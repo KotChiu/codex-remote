@@ -1,37 +1,41 @@
 # Codex Remote
 
-在手机上接着电脑上的 Codex 会话继续干活：看历史、发指令、审批命令、看 diff 和输出。
+Pick up the Codex session running on your desktop from your phone: read the history, send instructions, approve commands, inspect diffs and output.
 
-## 核心思路
+**English** | [简体中文](README.zh-CN.md)
 
-不另起一个 agent，而是接上**桌面 App 已经在用的那个 app-server daemon**
-（`~/.codex/app-server-control/app-server-control.sock`）。所以手机看到的会话、
-线程、状态就是电脑上那一份，在手机上发一条消息，桌面上同一个会话会继续往下跑。
+> Both language versions are maintained by hand — please update both when you change a feature.
+
+## How it works
+
+Rather than spawning another agent, the bridge attaches to **the same app-server daemon the desktop app is already using**
+(`~/.codex/app-server-control/app-server-control.sock`). The sessions, threads and statuses you see on the phone are the
+same ones on the computer; send a message from the phone and that very session keeps running on the desktop.
 
 ```
-手机浏览器  ──HTTP/SSE──▶  bridge (本仓库)  ──WebSocket over Unix socket──▶  codex app-server daemon
+phone browser  ──HTTP/SSE──▶  bridge (this repo)  ──WebSocket over Unix socket──▶  codex app-server daemon
 ```
 
-- 复用 Codex 桌面 App 的 daemon 和 `~/.codex`，不需要额外装东西。
-- 协议就是官方的 app-server JSON-RPC 2.0，没有私改。
-- 桥接层零依赖（只用 Node 内置模块），WebSocket-over-Unix-socket 是手写的。
+- Reuses the Codex desktop app's daemon and `~/.codex`; nothing extra to install.
+- Speaks the official app-server JSON-RPC 2.0 protocol, unmodified.
+- The bridge has zero dependencies (Node built-in modules only); the WebSocket-over-Unix-socket client is hand-written.
 
-## 安装
+## Installation
 
-前置条件：
+Prerequisites:
 
-- macOS，且已经装好并登录过 **Codex 桌面 App**（桥接的是它已经在跑的那个 daemon）。
-- Node.js：优先用 PATH 里的 `node`；没有就回退到 Codex 自带运行时，也可以用
-  `CODEX_REMOTE_NODE=/path/to/node` 指定。**零依赖，不需要 `npm install`。**
+- macOS with the **Codex desktop app** installed and signed in (the bridge attaches to the daemon it already runs).
+- Node.js: `node` from `PATH` is preferred; otherwise the runtime bundled with Codex is used, or point
+  `CODEX_REMOTE_NODE=/path/to/node` at one. **Zero dependencies, no `npm install`.**
 
-### 1. 拿代码
+### 1. Get the code
 
 ```bash
 git clone https://github.com/KotChiu/codex-remote.git ~/codex-remote
 cd ~/codex-remote
 ```
 
-git 不可用（例如 Xcode 命令行工具损坏、`/usr/bin/git` 报 `xcrun` 错）就下 zip 包，效果一样：
+If git is unusable (for example broken Xcode command line tools, `/usr/bin/git` failing with `xcrun`), download the zip instead:
 
 ```bash
 mkdir -p ~/codex-remote && cd ~/codex-remote
@@ -39,293 +43,307 @@ curl -L -o main.zip https://github.com/KotChiu/codex-remote/archive/refs/heads/m
 unzip -q main.zip && mv codex-remote-main/* .
 ```
 
-### 2. 前台试跑（可选，先确认能连上）
+### 2. Run in the foreground (optional sanity check)
 
 ```bash
 ./bin/codex-remote --port 8787
 ```
 
-它会打印手机可以直接打开的地址（带一次性 token）：
+It prints an address your phone can open directly (with a one-time token):
 
 ```
 http://192.168.x.x:8787/?token=<TOKEN>
 ```
 
-### 3. 装成常驻服务（推荐）
+### 3. Install as a background service (recommended)
 
 ```bash
 bash scripts/install-launchd.sh
 ```
 
-它做的事：把 `bin src public` 部署到 `~/.codex-remote/app` → 写
-`~/Library/LaunchAgents/com.codex.remote.plist` → 重启 LaunchAgent（**服务中断约 10 秒**）。
-之后开机自启、进程崩了自动拉起。卸载用 `bash scripts/uninstall-launchd.sh`。
+What it does: deploys `bin src public` to `~/.codex-remote/app` → writes
+`~/Library/LaunchAgents/com.codex.remote.plist` → restarts the LaunchAgent (**about 10 seconds of downtime**).
+After that it starts at login and is restarted if it crashes. Uninstall with `bash scripts/uninstall-launchd.sh`.
 
-注意这是用户级 LaunchAgent（`gui/<uid>`），所以要**保持该用户登录状态**，注销后服务会停。
+This is a per-user LaunchAgent (`gui/<uid>`), so **the user has to stay logged in**; logging out stops the service.
 
-### 4. 手机上打开
+### 4. Open it on your phone
 
-1. 手机和 Mac 在同一个局域网。
-2. 打开 `http://<Mac 的局域网 IP>:8787/?token=<TOKEN>`，带 token 只需一次，用来写 cookie。
-   地址印在 `~/.codex-remote/bridge.log` 开头，token 也存在 `~/.codex-remote/token`（600）。
-3. 再打开一次不带 token 的 `http://<Mac 的 IP>:8787/`，iOS 可以「添加到主屏幕」当固定入口。
+1. Phone and Mac on the same LAN.
+2. Open `http://<Mac LAN IP>:8787/?token=<TOKEN>`. The token is only needed once — it sets a cookie.
+   The address is printed at the top of `~/.codex-remote/bridge.log`; the token also lives in
+   `~/.codex-remote/token` (mode 600).
+3. Open `http://<Mac IP>:8787/` again without the token; on iOS you can "Add to Home Screen" as a permanent entry point.
 
-macOS 防火墙第一次会弹窗询问是否允许 `codex-remote` 接入，选「允许」。
+The macOS firewall asks once whether `codex-remote` may accept incoming connections — choose Allow.
 
-## 启动
+## Running
 
 ```bash
 ./bin/codex-remote --port 8787
 ```
 
-启动后会打印手机可以直接打开的地址（带一次性 token）：
+It prints an address your phone can open directly (with a one-time token):
 
 ```
 http://192.168.x.x:8787/?token=<TOKEN>
 ```
 
-第一次打开会写入 cookie 并跳转，之后直接访问 `http://192.168.x.x:8787/` 即可。
-token 保存在 `~/.codex-remote/token`（权限 600）。
+The first visit sets a cookie and redirects; afterwards `http://192.168.x.x:8787/` works as-is.
+The token is stored in `~/.codex-remote/token` (mode 600).
 
-## 手机侧
+## The phone UI
 
-1. 手机和 Mac 在同一个局域网。
-2. 浏览器打开上面那个带 token 的地址。
-3. iOS 可以「添加到主屏幕」，会以全屏 App 的形式打开。
+1. Phone and Mac on the same LAN.
+2. Open the tokenized address in a browser.
+3. On iOS you can "Add to Home Screen"; it opens full screen like an app.
 
-界面沿用 Codex 桌面版的配色（背景 `#111111`、侧边栏 `#131313`、强调色 `#0169cc`），
-宽屏时左侧常驻会话侧边栏，手机（≤767px）上侧边栏收成抽屉，点左上角 ☰ 滑出、选完自动收起。
+The UI follows the desktop Codex palette (background `#111111`, sidebar `#131313`, accent `#0169cc`).
+On wide screens the session sidebar is always visible; on phones (≤767px) it collapses into a drawer —
+tap ☰ at the top left to slide it out, and it closes once you pick a session.
 
-界面上能做的事：
+What you can do:
 
-- 侧边栏会话列表：名称、预览、运行状态（运行中 / 待审批）、相对时间；当前会话高亮。
-- 会话详情：用户消息、Agent 回复（Markdown）、思考过程、命令执行（命令 + 退出码 + 输出）、文件改动、计划。
-- 底部输入框继续发指令；任务运行时可以「中断」。
-- **运行中计时**：对齐桌面版，计时长在会话里、不在输入框旁边 —— 正在跑的那一轮下面是
-  `● 运行中 1:23`（脉冲圆点 + 走动的计时）。基准取服务端的 `turn.startedAt`（拿不到就用
-  第一次看到它开始跑的时刻兜底），格式 `0:12` / `1:23` / `1:02:03`；一秒一跳、只改那一个
-  文本节点，页面在后台就不动。
-- **运行中发消息 = 先挂起来，不打断**（对齐桌面版）：会话正在跑的时候按「发送」，消息不会打断
-  当前这一轮，而是浮在输入框上方等着（`待发` + 消息 + 「引导」/「✕」），这一轮跑完自动作为新
-  一轮发出去；中途切到别的会话、甚至关掉页面再打开（待发列表存在 `localStorage`）都还等着。
-  想让它立刻插进正在跑的那一轮，点那条上的「引导」—— 走 daemon 原生的 `turn/steer`，不新开一轮。
-  挂起来和引导都**不弹悬浮提示**（输入框上方那条、以及引导后立刻插回会话里的那条消息就是回执）；
-  只有真被 daemon 排队（`codex queue`）时，消息下面会多一行「排队中 · 电脑端这一轮跑完就执行」。
-  输入框旁边始终只有「发送」和运行中的「中断」两个按钮。被中断的那一轮 daemon 不一定发
-  `turn/completed`，所以桥接和页面每次读会话都拿服务端的 turn 状态校准一次，免得假「运行中」
-  把待发消息卡住。
-- **会话被电脑端占用时自动排队**：如果消息发出去时发现那个会话被电脑端占着
-  （`already has an active writer`），会退回 `codex queue` 排队，等当前这轮跑完自动执行。
-- **审批卡片**：Codex 请求执行命令/改文件时，手机上出现「允许 / 本会话都允许 / 拒绝 / 拒绝并中断」。
-- **新建对话 / 重命名 / 置顶**：标题栏点 ＋ 新建（默认建在 `~/Documents/Codex/chat`，可勾选「置顶显示」），
-  ✎ 重命名，☆/★ 置顶。置顶的会话排在最前面并带 ★，方便做成「固定窗口」（例如「健身饮食」）。
-  置顶和新对话记录存在浏览器 `localStorage`（`codex.pinned` / `codex.shelved`），只对当前浏览器生效。
-  那份 `codex.shelved`（刚建好、daemon 还没收录的会话）会定期核对：会话建立 10 分钟以后，
-  用 `?limit=1` 轻量读一次，**连续两次**读回「thread not loaded」才认定电脑上已经没有它了、
-  把它从列表摘掉（你亲手点开它失败也算一次）。之所以这么保守：daemon 的 `thread/list`
-  里根本没有这种「刚建好、还没跑过话」的会话，误删一次就再也找不回来了。
-- **项目分组 / 临时对话**（对齐桌面版侧边栏）：
-  - `项目` 这组读的是 Codex 自己的项目记录（app-server 的 `project/list`）。会话归到哪个项目，
-    看的是**会话的工作目录是否落在项目根目录下**（daemon 里会话的 `projectId` 通常是空的，
-    真正的关联就是 `cwd`）。所以「只有一个会话在项目里」通常只是因为这个项目目前只有一个会话 ——
-    其余会话的工作目录都是自动生成的 `~/Documents/Codex/chat`、`~/Documents/Codex/<日期>/…`，
-    自然落到 `其他对话`。想让会话进项目，新建时把「工作文件夹」填成项目目录即可。
-  - 分组标题可以点，折叠状态存在 `localStorage`（`codex.collapsedGroups`）。
-  - **在项目下新建对话**：项目名右边那个 `＋` 就是 —— 点它弹出的对话框已经把这个项目的
-    根目录填进「工作文件夹」，创建出来的会话直接落在这个项目底下（不会再掉进 `其他对话`）。
-    即使这个项目一个会话都没有，这一行也照样在（下面写「还没有对话，点上面 ＋ 新建一个」），
-    不然新建的第一个会话就没有入口。
-  - 「新建对话」对话框里还有一个**项目下拉**：选项目 = 把它的根目录填进工作文件夹；
-    手动改了路径，下拉会自动退回「不指定（自己填路径）」，不会出现「选了 A 项目却建到 B 目录」。
-  - `项目` 右边的 ＋ = 新建项目（名称 + 绝对路径，支持 `~` 开头），走 `project/create`。
-  - 侧边栏的 `✦ 临时对话` = daemon 的 **ephemeral 会话**：不写盘、不进历史，标题栏多一个
-    `结束` 按钮，关掉就从列表消失，桥接重启后自然也没了。
-  - 临时会话不落盘，daemon 的 `thread/read` 读不回它的内容（`thread/turns/list` 也不支持），
-    所以桥接层自己按序缓存它的事件（上限 4000 条），前端重开时回放 —— 刷新页面照样能看到
-    完整对话，包括你自己的消息（daemon 在 `turn/completed` 里只回摘要，回放时以 `item/*`
-    事件为准）。
-  - 临时会话不能排队（没有 rollout 供 `codex queue` 使用），它正在跑的时候再发会提示等一等。
-- **每个会话的权限档位**：输入框左上角那个小圆点，点开有四个选择，新建对话时也能直接选。
-  档位跟着会话走（存在桥接这边 `~/.codex-remote/permissions.json`），电脑上打开同一个会话
-  也会是同样的权限，所以手机上放开了、回到电脑不会偷偷降级。
+- **Session list** in the sidebar: name, preview, running state (running / waiting for approval), relative time;
+  the current session is highlighted.
+- **Session view**: your messages, agent replies (Markdown), reasoning, command executions (command + exit code + output),
+  file changes, plans.
+- Keep going with the composer at the bottom; press **Interrupt** while a turn is running.
+- **Running timer**: like the desktop app, the timer lives in the conversation, not next to the composer — beneath the
+  running turn you see `● Running 1:23` (pulsing dot + ticking clock). The baseline is the server's `turn.startedAt`
+  (falling back to the moment the bridge first saw the turn start); formats are `0:12` / `1:23` / `1:02:03`.
+  It ticks once a second, updates only that text node, and stops while the page is in the background.
+- **Sending during a running turn attaches the message instead of interrupting** (matches the desktop app): pressing
+  Send while a turn is running does not interrupt it — the message floats above the composer (`Pending` + text +
+  `Steer` / `✕`) and is sent as a new turn when the current one finishes. Switching sessions, or even closing and
+  reopening the page (the pending list is kept in `localStorage`), keeps it waiting. To inject it into the running turn
+  immediately, press **Steer** on that row — this uses the daemon's native `turn/steer` and does not start a new turn.
+  Attaching and steering **show no floating toasts** (the row above the composer, and the message inserted back into the
+  conversation, are the acknowledgement); only when the daemon really queues a run (`codex queue`) does the message get
+  a line underneath: "Queued · runs when the desktop turn finishes". There are only ever two buttons next to the
+  composer: Send, and Interrupt while running. The daemon does not always emit `turn/completed` for an interrupted
+  turn, so the bridge and the page reconcile against the server's turn state on every read — a phantom "running"
+  state cannot block pending messages.
+- **Automatic queueing when the desktop owns the session**: if a message arrives while the desktop is using that
+  session (`already has an active writer`), the bridge falls back to `codex queue` and runs it once the current turn ends.
+- **Approval cards**: when Codex asks to run a command or edit files, the phone shows Allow / Allow for this session /
+  Deny / Deny and interrupt.
+- **New chat / rename / pin**: ＋ in the title bar creates a chat (default location `~/Documents/Codex/chat`, with an
+  optional "pin" checkbox); ✎ renames; ☆/★ pins. Pinned sessions sit at the top with a ★, handy for a "fixed window"
+  (a daily-notes chat, say). Pins and new chats are stored in the browser's `localStorage` (`codex.pinned` /
+  `codex.shelved`) and only apply to that browser. The `codex.shelved` list (sessions created but not yet indexed by
+  the daemon) is verified periodically: 10 minutes after creation it does a lightweight `?limit=1` read, and only
+  **twice in a row** returning "thread not loaded" removes it from the list (a failed manual open counts once). The
+  reason for being this conservative: `thread/list` does not include sessions that were just created and never used,
+  so a wrong removal loses them for good.
+- **Project groups / ephemeral chats** (mirrors the desktop sidebar):
+  - The `Projects` group comes from Codex's own project records (`project/list`). A session belongs to a project when
+    **its working directory is inside the project root** (a thread's `projectId` in the daemon is usually empty;
+    `cwd` is the real link). So "only one session in the project" usually just means that project has one session so
+    far — the rest live in the auto-generated `~/Documents/Codex/chat`, `~/Documents/Codex/<date>/…` and land in
+    `Other chats`. Put a session in a project by setting its working folder to the project directory when creating it.
+  - Group headers are clickable; collapsed state is stored in `localStorage` (`codex.collapsedGroups`).
+  - **New chat inside a project**: the `＋` next to the project name — the dialog already has the project root filled
+    into "working folder", so the new session lands under that project (instead of `Other chats`). The row is shown
+    even when the project has no sessions (with "no chats yet, tap ＋ above"), otherwise the first session would have
+    no entry point.
+  - The **New chat** dialog also has a project dropdown: picking a project fills its root into the working folder;
+    editing the path by hand resets the dropdown to "not selected (enter a path)", so you can never end up with
+    "picked project A but created in directory B".
+  - The ＋ next to `Projects` creates a project (name + absolute path, `~` allowed) via `project/create`.
+  - `✦ Ephemeral chat` in the sidebar uses the daemon's **ephemeral sessions**: nothing is written to disk or
+    history, the title bar gains an `End` button, closing it removes it from the list, and it is gone after a bridge
+    restart.
+  - Because ephemeral sessions are not persisted, the daemon's `thread/read` cannot read them back
+    (`thread/turns/list` does not support them either), so the bridge caches their events in order (up to 4000) and
+    replays them when the page reopens — a refresh still shows the whole conversation, including your own messages
+    (the daemon's `turn/completed` only carries a summary, so the replay trusts `item/*` events).
+  - Ephemeral sessions cannot be queued (no rollout for `codex queue` to use); sending while one is running tells you
+    to wait.
+- **Per-session permission profile**: the small dot at the top left of the composer opens four choices; you can also
+  pick one when creating a chat. The profile follows the session (stored in `~/.codex-remote/permissions.json` on the
+  bridge), so opening the same session on the desktop shows the same permissions — loosening it on the phone will not
+  silently downgrade it back on the desktop.
 
-  | 档位 | 含义 | 对应 Codex 的 |
+  | Profile | Meaning | Codex equivalent |
   | --- | --- | --- |
-  | 跟随电脑 | 不下发任何覆盖，用电脑上这个会话现在的设置 | 默认 |
-  | 自己决策 | 工作区内自由跑，要越界 / 联网时弹卡片问你 | `-s workspace-write` + `on-request` |
-  | 帮我决策 | 越界请求交给 Codex 的审查子代理判断，不打扰你 | `--approve-for-me` |
-  | 完全访问 | 不询问、不沙箱，任何命令直接跑 | `--dangerously-bypass-approvals-and-sandbox` |
+  | Follow desktop | Sends no override; uses whatever the session is set to on the desktop | default |
+  | Decide for itself | Runs freely inside the workspace, asks with a card when crossing the boundary / needing network | `-s workspace-write` + `on-request` |
+  | Decide for me | Out-of-bounds requests go to Codex's review sub-agent, no interruption | `--approve-for-me` |
+  | Full access | No prompts, no sandbox, every command runs | `--dangerously-bypass-approvals-and-sandbox` |
 
-  实现在下一条消息上：发消息时桥接会把档位同时带在 `thread/resume` 和 `turn/start` 上；
-  会话正被电脑占用、只能排队时，则翻译成 `codex queue` 的参数。
-  弹层右上角会显示**电脑上实际生效**的设置（来自 daemon 的 `thread/settings/updated`），
-  刚改完还没发消息时显示 `—` 是正常的。
-- **白天 / 夜间配色**：默认跟随手机系统，侧边栏顶部那个 `🌓` 按钮点一下循环
-  `跟随手机 → ☀️ 白天 → 🌙 夜间`，记在 `localStorage` 的 `codex.theme` 里。
-  （放在侧边栏而不是标题栏，是因为标题栏要留给会话标题和状态。）
-  两套配色都写在 `public/style.css`（`--bg` / `--text` / `--accent-soft` 一类的变量），
-  由 `<html data-theme="light|dark">` 决定用哪套；`index.html` 里有一段内联脚本
-  在样式表之前就把属性定好，所以不会先闪一下再变色。切主题时会同步
-  `meta[name=theme-color]`（浏览器地址栏 / 状态栏底色）和 iOS 的
-  `apple-mobile-web-app-status-bar-style`（加主屏当 App 时状态栏字色）。
-- **一键复制**：Agent 回复里的代码块、命令输出右上角有个复制按钮；链接（含裸 URL —— 之前裸 URL
-  只是纯文本，现在会自动变成链接）、以及**够长的行内代码**（≥20 字符：token、路径、命令这一类的，
-  短的标识符不给按钮，免得满屏小图标）后面也跟一个复制按钮。点一下直接进剪贴板，按钮变成对勾，
-  下方弹出「已复制：…」。按钮用的是 12×12 的内联 SVG（跟文字同色），不是 emoji —— emoji 走系统
-  字体，在手机上会被放大成一大坨。
-  链接**点一下就开**：锚点本身是 `target="_blank"`，但手机上的内置浏览器（以及某些拦截
-  `target=_blank` 的壳）经常把它吃掉，点了没反应，所以页面自己接管了一次点击 —— 只认 `http/https`，
-  明确在新标签页里打开；万一被拦截，就不拦默认行为，交回给浏览器。
-  复制走的是 `copyValueFor()`：代码取整段 `<pre>`/`<code>` 的文本，链接取真实 `href`
-  （不是屏幕上被截断的显示文字）。手机访问的是 `http://192.168.x.x`，不是安全上下文，
-  `navigator.clipboard` 在那里不存在，所以兜底用屏幕外的 `readonly` textarea + `execCommand('copy')`
-  （`readonly` 是为了 iOS 不弹键盘，定位在屏幕外是不让页面滚走）。
-- **长会话不会把手机拖死**：一次 `thread/read` 实测能给到 11MB —— 光是 MCP 工具结果
-  就有 4.7MB（单条最大 65KB），31 分钟的会话有 2963 条记录。手机上解析这种体积要几百毫秒，
-  而 6 秒一次的后台轮询还会反复付这笔钱，表现就是「Codex 正在回复时，我在输入框里打字特别卡」。
-  现在桥接侧做了两件事：
-  - **只给最近 500 条记录**（`GET /api/threads/:id?limit=`，上限 20000），
-    整段会话仍然都在电脑上；手机端往下翻到头，聊天流顶部会出现「⇡ 显示更早的 500 条」，
-    点一下按需再拉，滚动位置会用「距底部的距离」锚住，不会跳。
-  - **超长文本剪掉中段**（工具结果 6KB、命令输出 8KB、思考内容 8KB、diff 20KB，
-    其余字符串兜底 40KB），只留开头和结尾并在中间标注省略了多少字符。
-  实测那段会话：payload 11.5MB → 1.24MB（gzip 341KB），前端 DOM 10.3MB → 1.1MB，
-  记录数 2963 → 499。
-- **流式输出不整块重画**：agent 正文每来一段过去都要重排一遍 markdown，思考过程每来一段
-  都要把整个聊天流重建一次（`public/app.js` 里的 `renderThread`）。现在改成
-  「先把脏掉的 item 记下来，最多每 120ms 刷一次对应的那个元素」
-  （`scheduleDeltaFlush` / `flushItemDelta`），整块重画只在 `item/started`、
-  `item/completed` 这类真结构变化时才发生。
-- **电脑端更新会提示刷新**：手机这个页面可能开着好几天都不刷新，而电脑上的桥接随时会被
-  重新部署。页面每 15 秒的延时探测会带上桥接版本号（`/api/ping` 的 `version`），一旦发现
-  和自己载入时的不一样，就弹一条「电脑端已更新到 vX，点这里刷新页面」（这种提示不自动消失，
-  点一下才刷新），不用再自己猜「新加的功能手机上怎么没有」。
-- **页面名字**：侧边栏顶部显示的就是这台机器（默认主机名），点一下就能改名，多台电脑一眼区分。
-- **连接延时按钮**：输入框左上角、贴着「跟随电脑」右边那个小圆点就是当前手机 ↔ 电脑的往返延时，
-  绿 <80ms / 黄 <250ms / 红（或显示「无 Codex」）表示链路或 Codex 有问题。
-  点一下展开明细：`手机 ↔ 电脑`、`电脑 ↔ Codex`（走 `/api/ping`，服务端用无副作用的
-  `thread/loaded/list` 连问三次取最小值）、**接入路径**、实时推送状态、检查时间、桥接版本。
-  进页面、每 15 秒、以及从后台切回来时各测一次，页面不可见时不发请求。
-  「接入路径」是服务端按客户端源地址算出来的（本机直连 / 局域网 / Tailscale / 远端）。
-  如果显示 **Tailscale 中继**，说明手机没走局域网，而是从 Tailscale 的 100.64/10 段进来、
-  且没打通直连（本机实测过 `relay "tok"`，单程 200ms 起）—— 面板里会直接给出带 token 的
-  局域网地址链接，手机和电脑在同一个 Wi-Fi 时点一下就能切过去，延时会掉到个位数毫秒。
-  连不上时不再只靠颜色区分（色弱、强光下看不出来）：那个圆点会换成红色的 **⚠**，
-  面板里对应几行也带 ⚠（`⚠ 连不上` / `⚠ 未连接` / `⚠ 中断，重连中`）。
+  It applies to the next message: when sending, the bridge passes the profile on both `thread/resume` and
+  `turn/start`; if the session is owned by the desktop and can only be queued, it is translated into `codex queue`
+  arguments. The top right of the panel shows the setting **actually in effect on the computer** (from the daemon's
+  `thread/settings/updated`); `—` right after a change, before sending anything, is normal.
+- **Light / dark theme**: follows the phone's system by default; the `🌓` button at the top of the sidebar cycles
+  `Follow system → ☀️ Light → 🌙 Dark`, stored in `localStorage` under `codex.theme`. (It lives in the sidebar because
+  the title bar is reserved for the session title and status.) Both palettes are in `public/style.css`
+  (`--bg` / `--text` / `--accent-soft` and friends), selected by `<html data-theme="light|dark">`; an inline script in
+  `index.html` sets the attribute before the stylesheet loads, so there is no flash. Switching the theme also updates
+  `meta[name=theme-color]` (address bar / status bar) and iOS's `apple-mobile-web-app-status-bar-style` (status bar
+  text colour when added to the home screen).
+- **One-tap copy**: code blocks and command output have a copy button in the top right; links (including bare URLs —
+  previously plain text, now linkified automatically) and **long inline code** (≥20 chars: tokens, paths, commands;
+  short identifiers get no button, to avoid a wall of icons) get one too. Tap it and the value lands on the clipboard,
+  the button turns into a check mark, and a "Copied: …" toast appears. The icon is a 12×12 inline SVG (inherits the
+  text colour), not an emoji — emoji use the system font and turn into a giant blob on phones.
+  Links **open on a single tap**: the anchor is already `target="_blank"`, but in-app browsers on phones (and some
+  shells that block `target=_blank`) often swallow it, so the page takes the click over — only `http/https`, opened
+  explicitly in a new tab; if that is blocked too, it leaves the default behaviour alone and hands it back to the
+  browser. Copying goes through `copyValueFor()`: code uses the whole `<pre>`/`<code>` text, links use the real `href`
+  (not the truncated text on screen). The phone talks to `http://192.168.x.x`, which is not a secure context, so
+  `navigator.clipboard` does not exist there; the fallback is an off-screen `readonly` textarea plus
+  `execCommand('copy')` (`readonly` stops iOS from popping the keyboard, off-screen stops the page from scrolling).
+- **Long sessions don't choke the phone**: a single `thread/read` has been measured at 11MB — 4.7MB of that MCP tool
+  results (65KB in one item), 2963 items in a 31-minute session. Parsing that takes hundreds of milliseconds on a
+  phone, and the 6-second background poll pays it over and over — which feels like "typing in the composer is laggy
+  while Codex is replying". The bridge now does two things:
+  - **Only the latest 500 items** (`GET /api/threads/:id?limit=`, max 20000). The whole session is still on the
+    computer; scrolling to the top of the chat stream shows "⇡ show 500 earlier items", which fetches on demand; the
+    scroll position is anchored by distance-from-bottom, so the view does not jump.
+  - **Middle-truncation of very long text** (tool results 6KB, command output 8KB, reasoning 8KB, diffs 20KB, other
+    strings 40KB), keeping the head and tail and noting how many characters were omitted.
+  Measured on that session: payload 11.5MB → 1.24MB (gzip 341KB), front-end DOM 10.3MB → 1.1MB, items 2963 → 499.
+- **Streaming does not re-render everything**: previously every chunk of agent text re-rendered its Markdown and every
+  chunk of reasoning rebuilt the whole chat stream (`renderThread` in `public/app.js`). Now dirty items are recorded
+  and only the matching element is refreshed, at most every 120ms (`scheduleDeltaFlush` / `flushItemDelta`); a full
+  re-render only happens on real structural changes such as `item/started` and `item/completed`.
+- **The desktop nudges you to refresh**: this page can stay open on a phone for days while the bridge on the computer
+  gets redeployed. The 15-second latency probe carries the bridge version (`/api/ping`'s `version`); when it differs
+  from the version the page loaded with, you get "The computer is now running vX — tap to refresh" (that toast does
+  not auto-dismiss; tap it to reload), so you do not have to guess why a new feature is missing.
+- **Page name**: the top of the sidebar shows this machine (hostname by default); tap it to rename — handy with
+  several computers.
+- **Latency button**: the dot at the top left of the composer, right next to "Follow desktop", is the current
+  phone ↔ computer round trip. Green <80ms / yellow <250ms / red (or "no Codex") means the link or Codex has a
+  problem. Tap it for details: `phone ↔ computer`, `computer ↔ Codex` (via `/api/ping`, using the side-effect-free
+  `thread/loaded/list` three times and taking the minimum), **ingress path**, live-push state, check time, bridge
+  version. It measures on page load, every 15 seconds, and when returning from the background; nothing is sent while
+  the page is hidden. The ingress path is derived server-side from the client's source address (local / LAN /
+  Tailscale / remote). If it says **Tailscale relay**, the phone is not on the LAN — it comes in over Tailscale's
+  100.64/10 range without a direct path (measured `relay "tok"`: 200ms+ one way) — so the panel offers a tokenized
+  LAN URL; tap it while the phone and computer share a Wi-Fi network and latency drops to single-digit milliseconds.
+  When disconnected, colour is not the only signal (colour-blind users, bright sunlight): the dot becomes a red **⚠**
+  and the affected rows read `⚠ unreachable` / `⚠ disconnected` / `⚠ interrupted, reconnecting`.
 
-- **链路层做的三件事**：服务端 `keepAliveTimeout` 调到 65 秒（Node 默认 5 秒就断，
-  而延时探测每 15 秒一次，等于每次都在新建 TCP 连接，白搭一个 RTT）；超过 1KB 的 JSON
-  响应走 gzip（一次完整会话读取 1.6MB → 424KB）；启动时打印的地址里局域网排最前面。
-- **打开 / 刷新后自动停在最新一条**：图片是异步加载的，会持续把内容往下钉住，不用手动下拉；
-  自己往上翻看历史时不会被拽回去。已关闭浏览器自身的滚动位置恢复（`history.scrollRestoration = 'manual'`），
-  手机从后台切回来（bfcache 还原）也会重新定位到最后一条，所以刷新后不会再停在半截。
-- 页面高度用 `100dvh`，iOS Safari 收起/展开工具栏时输入框和最新消息不会被挡住。
-- 输入框字号固定 16px，iOS 上点输入框不会再把页面放大。
-- 全程 SSE 实时推送，输出边跑边出。
+- **Three things at the transport layer**: `keepAliveTimeout` is raised to 65 seconds (Node closes idle connections
+  after 5s by default while the probe runs every 15s, i.e. a fresh TCP connection — and a wasted RTT — every time);
+  JSON responses over 1KB are gzipped (a full session read: 1.6MB → 424KB); the addresses printed at startup list the
+  LAN one first.
+- **Lands on the newest message after opening / refreshing**: images load asynchronously and keep the view pinned to
+  the bottom, so there is no manual scrolling; scrolling up to read history is not yanked back. The browser's own
+  scroll restoration is disabled (`history.scrollRestoration = 'manual'`), and returning from the background (bfcache
+  restore) re-anchors to the last message, so a refresh never leaves you halfway up.
+- Page height uses `100dvh`, so the composer and the newest message are not hidden while iOS Safari collapses or
+  expands its toolbars.
+- The composer font size is fixed at 16px, so focusing it on iOS no longer zooms the page.
+- Everything is pushed live over SSE; output appears as it is produced.
 
-## 常驻运行
+## Background service
 
 ```bash
-./scripts/install-launchd.sh     # 安装 LaunchAgent，开机自启 + 崩溃自动重启
-./scripts/uninstall-launchd.sh   # 卸载
+./scripts/install-launchd.sh     # install the LaunchAgent: start at login, restart on crash
+./scripts/uninstall-launchd.sh   # uninstall
 ```
 
-日志：`~/.codex-remote/bridge.log`
+Logs: `~/.codex-remote/bridge.log`
 
-## 前置条件
+## Requirements
 
-- 桌面 App（或 `codex app-server daemon start`）在运行，控制 socket 存在。
-  `bin/codex-remote` 启动前会自动尝试 `codex app-server daemon start`。
-- Node.js：优先用 PATH 里的 `node`，否则回退到 Codex 自带的运行时。
-  也可以用 `CODEX_REMOTE_NODE=/path/to/node` 指定。
+- The desktop app (or `codex app-server daemon start`) is running and the control socket exists.
+  `bin/codex-remote` tries `codex app-server daemon start` on startup.
+- Node.js: `node` from `PATH` first, otherwise the runtime bundled with Codex.
+  You can also set `CODEX_REMOTE_NODE=/path/to/node`.
 
-## 参数
+## Options
 
-| 参数 | 默认值 | 说明 |
+| Option | Default | Description |
 | --- | --- | --- |
-| `--port` | `8787` | 监听端口 |
-| `--host` | `0.0.0.0` | 监听地址；只想本机用就设 `127.0.0.1` |
-| `--socket` | `~/.codex/app-server-control/app-server-control.sock` | app-server 控制 socket |
-| `--token-file` | `~/.codex-remote/token` | token 文件；删掉会重新生成 |
-| `--name` | 主机名 | 页面/标签页显示的名字，用来区分多台电脑 |
-| `--name-file` | `~/.codex-remote/name` | 名字的持久化文件，也可以直接用环境变量 `CODEX_REMOTE_NAME` |
+| `--port` | `8787` | Port to listen on |
+| `--host` | `0.0.0.0` | Bind address; use `127.0.0.1` for local-only |
+| `--socket` | `~/.codex/app-server-control/app-server-control.sock` | app-server control socket |
+| `--token-file` | `~/.codex-remote/token` | Token file; delete it to regenerate |
+| `--name` | hostname | Name shown in the page/tab, to tell computers apart |
+| `--name-file` | `~/.codex-remote/name` | Persisted name; `CODEX_REMOTE_NAME` also works |
 
-## 安全
+## Security
 
-- 所有接口都要 token（cookie / `Authorization: Bearer` / 一次性 `?token=`）。
-- 但这是**明文 HTTP**，同局域网的人可以嗅探流量。只在你信任的局域网里用。
-- **不要**把端口映射到公网。要在外网用，请套一层 TLS 反代（Caddy/nginx）或走 VPN/Tailscale，
-  然后把 `--host` 设成 `127.0.0.1` 只让反代访问。
-- app-server 本身能力很强：能执行命令、改文件。token 等同于这些权限，别外传。
+- Every endpoint requires the token (cookie / `Authorization: Bearer` / one-time `?token=`).
+- It is **plain HTTP**: anyone on the same LAN can sniff the traffic. Use it only on a network you trust.
+- Do **not** expose the port to the internet. For remote access, put it behind a TLS reverse proxy (Caddy/nginx) or a
+  VPN/Tailscale, and set `--host` to `127.0.0.1` so only the proxy can reach it.
+- app-server is powerful: it can run commands and edit files. The token is equivalent to those permissions — do not
+  share it.
 
-## 排查
+## Troubleshooting
 
-| 现象 | 原因 / 处理 |
+| Symptom | Cause / fix |
 | --- | --- |
-| 页面提示「未连接」 | daemon 没跑：`codex app-server daemon start` |
-| 手机打不开 | 不在同一网段、Mac 的防火墙、或 `--host` 设成了 `127.0.0.1` |
-| 401 unauthorized | 用带 `?token=` 的完整地址重新打开一次 |
-| 想换 token | 删除 `~/.codex-remote/token` 后重启服务 |
-| 发消息提示「已排队」 | 正常：该会话正在电脑上运行，消息排在后面自动执行 |
-| 发的消息落到回答下面 / 回答跑到消息上面 | 以前会把「还没被 daemon 记进会话」的那条回显贴到整个对话流末尾，看起来就像回答在前面。现在回显按归属插回自己那一轮的原位：运行中点「引导」、或消息插进正在跑的那一轮（daemon 要到下一个模型回合才把它记成一条记录，实测十几秒到几十秒）时，消息会停在发送时刻的位置，后续输出接在它下面 |
-| 点了回复里的链接没反应 | 页面自己接管了链接点击（新标签打开）；若是内嵌浏览器把新标签也拦了，长按链接复制地址到浏览器里开 |
-| 提示「no rollout found」 | 会话 id 不存在（多为列表过期），回列表刷新即可 |
-| 延时一直 200ms 以上 | 多半是手机走了 Tailscale 中继而不是局域网：点延时按钮看「接入路径」，用面板里的局域网链接重开一次 |
-| 手机上设了权限档位但还在弹审批 | 档位只对「下一条消息」生效；若那个会话正被电脑占用，`thread/resume` 会被 `active writer` 挡掉，档位下发不进去，等这轮跑完再发 |
+| The page says "disconnected" | The daemon is not running: `codex app-server daemon start` |
+| The phone cannot connect | Different subnet, macOS firewall, or `--host` set to `127.0.0.1` |
+| 401 unauthorized | Reopen the full address that includes `?token=` |
+| Rotate the token | Delete `~/.codex-remote/token` and restart the service |
+| Sending says "queued" | Normal: the session is running on the computer; the message runs afterwards |
+| A message lands below the answer / the answer appears above the message | The bridge used to append the echo of a message the daemon had not recorded yet to the end of the stream, so it looked like the answer came first. Echoes are now inserted back into their own turn: when you steer into a running turn (the daemon only records it on the next model turn, measured at tens of seconds), the message stays where you sent it and later output follows below. |
+| Tapping a link in a reply does nothing | The page handles link clicks itself (opens a new tab); if an embedded browser blocks new tabs too, long-press the link and copy the address into a browser |
+| "no rollout found" | The session id does not exist (usually a stale list); refresh the list |
+| Latency stays above 200ms | The phone is probably on a Tailscale relay, not the LAN: open the latency panel, check "ingress path", and use the LAN link it offers |
+| A permission profile is set on the phone but approvals still appear | The profile applies to the **next message**; if the desktop owns that session, `thread/resume` is rejected with `active writer` and the profile cannot be applied — send again after that turn ends |
 
-## 文件
+## Files
 
 ```
-bin/codex-remote            启动脚本
-src/ws-unix.js              WebSocket over Unix socket 客户端（零依赖实现）
-src/appserver.js            app-server JSON-RPC 2.0 客户端
-src/codex-cli.js            codex CLI 定位 + 排队投递（占用时兜底）
-src/permissions.js          会话权限档位定义与落盘
-src/server.js               HTTP + SSE 桥接，鉴权，审批转发
-public/                     手机端界面
-launchd/                    常驻服务模板
-scripts/probe.js            连通性探针，直接列会话
-scripts/install-launchd.sh  安装常驻服务
+bin/codex-remote            launcher script
+src/ws-unix.js              WebSocket-over-Unix-socket client (zero dependencies)
+src/appserver.js            app-server JSON-RPC 2.0 client
+src/codex-cli.js            locate the codex CLI + queue delivery (fallback when busy)
+src/permissions.js          per-session permission profiles, persisted to disk
+src/server.js               HTTP + SSE bridge, auth, approval forwarding
+public/                     phone UI
+launchd/                    background service template
+scripts/probe.js            connectivity probe, lists sessions directly
+scripts/install-launchd.sh  install the background service
 ```
 
-## 验证
+## Verifying
 
 ```bash
-# 直连 daemon，列出会话
-./bin/codex-remote --port 8787 &     # 或已由 launchd 启动
+# talk to the daemon directly and list sessions
+./bin/codex-remote --port 8787 &     # or already started by launchd
 curl -s -H "Authorization: Bearer $(cat ~/.codex-remote/token)" \
   http://127.0.0.1:8787/api/threads?limit=5
 
-# 量一下两段链路（手机侧按钮用的就是它；daemon.ms 是电脑 ↔ Codex）
+# measure both hops (this is what the phone button uses; daemon.ms is computer ↔ Codex)
 curl -s -H "Authorization: Bearer $(cat ~/.codex-remote/token)" \
   http://127.0.0.1:8787/api/ping
 
-# 看/改某个会话的权限档位（default / ask / auto / full）
+# read / change a session's permission profile (default / ask / auto / full)
 curl -s -H "Authorization: Bearer $(cat ~/.codex-remote/token)" \
   http://127.0.0.1:8787/api/permissions
 curl -s -H "Authorization: Bearer $(cat ~/.codex-remote/token)" -H 'content-type: application/json' \
   -d '{"mode":"ask"}' http://127.0.0.1:8787/api/threads/<thread-id>/permissions
 ```
 
-## 多台电脑
+## Multiple computers
 
-每台机器各跑一份桥接，靠页面名字区分（默认取主机名）：
+Run one bridge per machine and tell them apart by page name (hostname by default):
 
-- 手机上直接点侧边栏顶部的名字就能改，写进 `~/.codex-remote/name`
-- 也可以 `bin/codex-remote --name "我的 Mac"`，或用环境变量 `CODEX_REMOTE_NAME`
-- `GET /api/meta` 返回 `{name, hostname, version, startedAt}`，一眼看出连的是哪台
+- Tap the name at the top of the sidebar to rename it; stored in `~/.codex-remote/name`
+- Or `bin/codex-remote --name "My Mac"`, or the `CODEX_REMOTE_NAME` environment variable
+- `GET /api/meta` returns `{name, hostname, version, startedAt}` — one glance tells you which machine you are on
 
-### 更新代码并重新部署
+### Updating and redeploying
 
-不管用哪种方式拿代码，最后一步都是 `install-launchd.sh`：它把 `bin src public` 覆盖到
-`~/.codex-remote/app`，重写 plist 并重启 LaunchAgent（服务会中断约 10 秒）。
+Whichever way you got the code, the last step is always `install-launchd.sh`: it copies `bin src public` over
+`~/.codex-remote/app`, rewrites the plist and restarts the LaunchAgent (about 10 seconds of downtime).
 
 ```bash
-git clone https://github.com/KotChiu/codex-remote.git ~/codex-remote   # 首次
-cd ~/codex-remote && git pull && bash scripts/install-launchd.sh      # 之后
+git clone https://github.com/KotChiu/codex-remote.git ~/codex-remote   # first time
+cd ~/codex-remote && git pull && bash scripts/install-launchd.sh      # afterwards
 ```
 
-没有可用 git 的机器（`/usr/bin/git` 依赖的 CommandLineTools 损坏）可以下载 zip 包再部署：
+On a machine where git is unusable (`/usr/bin/git`'s CommandLineTools are broken), download the zip and deploy that:
 
 ```bash
 mkdir -p ~/codex-remote && cd ~/codex-remote
@@ -333,61 +351,62 @@ curl -L -o main.zip https://github.com/KotChiu/codex-remote/archive/refs/heads/m
 unzip -q -o main.zip && bash codex-remote-main/scripts/install-launchd.sh
 ```
 
-想彻底修好本机的 git（之后 `git pull` 就能用）：`xcode-select --install`，装完
-`git --version` 有输出即可。
+To fix git properly (`git pull` works again): run `xcode-select --install`; once it finishes `git --version` should
+print a version.
 
-自己改代码时，直接在源码目录跑 `bash scripts/install-launchd.sh` 即可。
+When you edit the code yourself, just run `bash scripts/install-launchd.sh` in the source directory.
 
-### 部署后自检
+### Post-deploy checks
 
 ```bash
-launchctl print gui/$(id -u)/com.codex.remote | grep -E 'state|pid'   # 应为 running
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/      # 401 = 正常（需要 token）
-grep -c newChatCwd ~/.codex-remote/app/public/app.js                # 部署内容是否为新版
-tail -20 ~/.codex-remote/bridge.log                                  # 出错时才看 bridge.err.log
+launchctl print gui/$(id -u)/com.codex.remote | grep -E 'state|pid'   # should be running
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/      # 401 = good (token required)
+grep -c newChatCwd ~/.codex-remote/app/public/app.js                # is the deployed copy current?
+tail -20 ~/.codex-remote/bridge.log                                  # check bridge.err.log on errors
 ```
 
-手机上刷新一次页面就能拿到新版（`public/` 用 `Cache-Control: no-store`）。
+Refresh the page once on the phone to get the new version (`public/` is served with `Cache-Control: no-store`).
 
-改了前端以后，如果希望**已经开着页面的手机**被主动提醒刷新，把 `src/server.js` 里的
-`BRIDGE_VERSION` 递增一下（前端拿它跟 `/api/ping` 回报的版本比对）。不递增也能用，
-只是手机上要自己下拉刷新。
+After changing the front end, bump `BRIDGE_VERSION` in `src/server.js` if you want phones that already have the page
+open to be told to refresh (the page compares it with the `version` returned by `/api/ping`). Not bumping also works —
+you just have to pull-to-refresh manually.
 
-### 调试时别留测试会话
+### Do not leave test sessions behind
 
-改这套东西免不了要真发几条消息试，试出来的会话别留在列表里：
+You will inevitably send a few real messages while working on this; do not leave those sessions in the list:
 
-- **首选临时对话**（不写盘、不进历史，桥接重启就没了）：
+- **Prefer ephemeral chats** (nothing written to disk, not in history, gone when the bridge restarts):
 
   ```bash
   TOKEN=$(cat ~/.codex-remote/token)
-  # 建：拿返回里的 thread.id
+  # create: take thread.id from the response
   curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d '{"ephemeral":true,"cwd":"'"$PWD"'"}' http://127.0.0.1:8787/api/new-thread
-  # 用完关掉
+  # close when done
   curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d '{"threadId":"<id>"}' http://127.0.0.1:8787/api/ephemeral/close
   ```
-- 有些路径只能拿真会话验（临时会话读不回内容），那就**试完立刻删**：
-  `node scripts/delete-thread.js <threadId>` —— 走 daemon 的 `thread/delete`，rollout 文件一起没。
-- 「新建了但一句话没发」的会话在列表里根本看不见，但会在 `~/.codex/sessions` 留下一个只有
-  `session_meta` 一行的 rollout 存根，用 `node scripts/delete-thread.js --stubs` 清掉。
+- Some paths can only be tested with a real session (ephemeral ones cannot be read back) — then **delete it right
+  away**: `node scripts/delete-thread.js <threadId>` (goes through the daemon's `thread/delete`; the rollout file goes
+  with it).
+- A session created but never used is invisible in the list, yet leaves a rollout stub in `~/.codex/sessions`
+  containing a single `session_meta` line; clean those up with `node scripts/delete-thread.js --stubs`.
 
-## 仓库
+## Repository
 
-代码托管在 GitHub：<https://github.com/KotChiu/codex-remote>
+Code lives on GitHub: <https://github.com/KotChiu/codex-remote>
 
 ```bash
 git clone https://github.com/KotChiu/codex-remote.git
-git remote add origin https://github.com/KotChiu/codex-remote.git   # 已有目录时
+git remote add origin https://github.com/KotChiu/codex-remote.git   # in an existing checkout
 ```
 
-发布流程：改完代码 → `bash scripts/install-launchd.sh` 部署 → `git add -A && git commit`
-→ `git push origin main`。手机上刷新一次页面就能拿到新版。
+Release flow: change code → `bash scripts/install-launchd.sh` to deploy → `git add -A && git commit` →
+`git push origin main`. Refresh the page once on the phone to pick it up.
 
-macOS 上先确认 git 可用：`git --version` 报 `xcrun: ... missing xcrun` 说明 Xcode 命令行工具
-缺失（`/usr/bin/git` 只是它的壳），执行一次 `xcode-select --install` 即可修好；不想装 Xcode
-也可以直接用 Codex 运行时自带的 git：
+Before you publish changes, make sure git works on macOS: `git --version` failing with `xcrun: ... missing xcrun`
+means the Xcode command line tools are missing (`/usr/bin/git` is just a shim) — run `xcode-select --install` once.
+If you would rather not install Xcode, the git bundled with the Codex runtime works too:
 
 ```bash
 ~/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/git --version
