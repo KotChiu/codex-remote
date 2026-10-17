@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BUNDLED_NODE="${HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
+
+if [[ -n "${CODEX_REMOTE_NODE:-}" ]]; then
+  NODE_BIN="${CODEX_REMOTE_NODE}"
+elif command -v node >/dev/null 2>&1; then
+  NODE_BIN="$(command -v node)"
+elif [[ -x "${BUNDLED_NODE}" ]]; then
+  NODE_BIN="${BUNDLED_NODE}"
+else
+  echo "no Node.js runtime found; set CODEX_REMOTE_NODE to a node binary" >&2
+  exit 1
+fi
+
+if command -v codex >/dev/null 2>&1; then
+  codex app-server daemon start >/dev/null 2>&1 || true
+fi
+
+exec "${NODE_BIN}" "${PROJECT_DIR}/src/server.js" "$@"

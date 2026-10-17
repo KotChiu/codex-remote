@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#111111" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111111'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='%23fcfcfc' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h7' stroke='%230169cc' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <title>Codex Remote</title>
+    <script>
+      /* 在样式表之前定好白天/夜间，避免首屏先闪一下再换色。
+         模式存在 localStorage 的 codex.theme：auto（跟随手机系统）/ light / dark。 */
+      (function () {
+        var mode = 'auto';
+        try {
+          mode = localStorage.getItem('codex.theme') || 'auto';
+        } catch (err) {}
+        if (mode !== 'light' && mode !== 'dark') mode = 'auto';
+        var dark =
+          mode === 'dark' ||
+          (mode === 'auto' &&
+            window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.documentElement.dataset.themeMode = mode;
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', dark ? '#111111' : '#ffffff');
+      })();
+    </script>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar" aria-label="会话列表">
+        <div id="sidebar-head">
+          <span id="sidebar-brand">Codex</span>
+          <button id="theme-button" type="button" aria-label="外观" title="外观">🌓</button>
+          <button id="sidebar-refresh" type="button" aria-label="刷新列表">⟳</button>
+          <button id="sidebar-close" type="button" aria-label="收起侧边栏">✕</button>
+        </div>
+        <div id="sidebar-status">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">连接中…</span>
+        </div>
+        <div id="sidebar-actions">
+          <button id="sidebar-new-chat" type="button">＋ 新建对话</button>
+          <button id="sidebar-new-ephemeral" type="button" title="临时对话不会写进历史，关掉就没了">✦ 临时对话</button>
+        </div>
+        <div id="project-head">
+          <span>项目</span>
+          <button id="project-add" type="button" aria-label="新建项目" title="新建项目">＋</button>
+        </div>
+        <ul id="thread-list"></ul>
+        <p id="list-empty" hidden>没有会话</p>
+      </aside>
+
+      <div id="scrim" hidden></div>
+
+      <section id="main-pane">
+        <header id="topbar">
+          <button id="sidebar-toggle" type="button" aria-label="会话列表">☰</button>
+          <div id="title-area">
+            <div id="title">Codex</div>
+            <div id="subtitle">连接中…</div>
+          </div>
+          <button id="pin-button" type="button" aria-label="置顶会话" hidden>☆</button>
+          <button id="rename-button" type="button" aria-label="重命名会话" hidden>✎</button>
+          <button id="ephemeral-close" type="button" aria-label="结束临时对话" title="结束临时对话" hidden>结束</button>
+          <button id="new-chat-button" type="button" aria-label="新建对话">＋</button>
+          <button id="refresh-button" type="button" aria-label="刷新">⟳</button>
+        </header>
+
+        <div id="latency-panel" hidden>
+          <div class="latency-row"><span>手机 ↔ 电脑</span><span id="latency-lan">—</span></div>
+          <div class="latency-row"><span>电脑 ↔ Codex</span><span id="latency-daemon">—</span></div>
+          <div class="latency-row"><span>接入路径</span><span id="latency-path">—</span></div>
+          <div class="latency-row"><span>实时推送</span><span id="latency-stream">—</span></div>
+          <div class="latency-row"><span>检查时间</span><span id="latency-at">—</span></div>
+          <div class="latency-row"><span>桥接版本</span><span id="latency-version">—</span></div>
+          <p id="latency-hint" hidden></p>
+        </div>
+
+        <div id="thread-view">
+          <div id="thread-meta"></div>
+          <div id="turns"></div>
+        </div>
+
+        <footer id="composer" hidden>
+          <div id="approval-slot"></div>
+          <div id="attach-strip" hidden></div>
+          <div id="pending-strip" hidden></div>
+          <div id="composer-tools">
+            <button id="permission-button" type="button" aria-haspopup="true" aria-expanded="false">
+              <span id="permission-dot"></span><span id="permission-text">跟随电脑</span>
+            </button>
+            <button id="composer-latency" type="button" aria-label="连接延时" title="连接延时">
+              <span class="latency-dot" id="composer-latency-dot"></span><span class="latency-icon" id="composer-latency-icon" hidden>⚠</span><span id="composer-latency-text">—</span>
+            </button>
+            <div id="permission-panel" hidden>
+              <div id="permission-head">
+                <span>本对话权限</span>
+                <span id="permission-effective">—</span>
+              </div>
+              <div id="permission-options"></div>
+              <p id="permission-note">
+                改完从下一条消息开始生效。设置跟着会话走，电脑上打开同一个会话也会是同样的权限。
+              </p>
+            </div>
+          </div>
+          <div id="composer-row">
+            <button id="attach-button" type="button" aria-label="添加图片">📎</button>
+            <input id="attach-input" type="file" accept="image/*" multiple hidden />
+            <textarea
+              id="message-input"
+              rows="1"
+              placeholder="接着让它做什么…"
+              autocomplete="off"
+              autocapitalize="sentences"
+            ></textarea>
+            <button id="send-button" type="button">发送</button>
+            <button id="stop-button" type="button" hidden>中断</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <div id="new-chat-modal" hidden>
+      <div id="new-chat-card" role="dialog" aria-label="新建对话">
+        <h2 id="new-chat-heading">新建对话</h2>
+        <input
+          id="new-chat-name"
+          type="text"
+          maxlength="120"
+          placeholder="名称，例如：健身饮食"
+          autocomplete="off"
+        />
+        <input
+          id="new-chat-cwd"
+          type="text"
+          placeholder="工作文件夹（留空 = ~/Documents/Codex/chat）"
+          autocomplete="off"
+        />
+        <label id="new-chat-project-row">
+          <span>项目</span>
+          <select id="new-chat-project"></select>
+        </label>
+        <label id="new-chat-permission-row">
+          <span>权限</span>
+          <select id="new-chat-permission"></select>
+        </label>
+        <label id="new-chat-pin-row">
+          <input id="new-chat-pin" type="checkbox" checked />
+          <span>置顶显示（固定在列表顶部）</span>
+        </label>
+        <div id="new-chat-actions">
+          <button id="new-chat-cancel" type="button">取消</button>
+          <button id="new-chat-create" type="button">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" hidden></div>
+    <div id="new-project-modal" hidden>
+      <div id="new-project-card" role="dialog" aria-label="新建项目">
+        <h2>新建项目</h2>
+        <input id="new-project-name" type="text" maxlength="120" placeholder="项目名称，例如：RemoteCodex" autocomplete="off" />
+        <input
+          id="new-project-path"
+          type="text"
+          placeholder="项目文件夹（绝对路径，例如 ~/Documents/Project/foo）"
+          autocomplete="off"
+          list="cwd-options"
+        />
+        <datalist id="cwd-options"></datalist>
+        <div id="new-project-actions">
+          <button id="new-project-cancel" type="button">取消</button>
+          <button id="new-project-create" type="button">创建</button>
+        </div>
+      </div>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

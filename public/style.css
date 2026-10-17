@@ -1,0 +1,1738 @@
+/* Codex Remote — 白天 / 夜间两套配色，默认跟随手机系统，也可以在顶栏手动切换。
+   具体用哪套由 <html data-theme="light|dark"> 决定：index.html 里有一小段内联脚本
+   在首屏渲染前就把它定好，避免先闪一下再变色的白屏感。
+   夜间配色对齐 Codex Desktop 的 Codex Dark。 */
+:root {
+  /* ---- 白天 ---- */
+  --bg: #ffffff;
+  --bg-sidebar: #f7f7f8;
+  --bg-elevated: #ffffff;
+  --bg-input: #f1f1f3;
+  --bg-hover: #ebebee;
+  --border: #e3e3e7;
+  --border-strong: #cdcdd3;
+  --text: #1a1a1c;
+  --text-dim: #6a6a72;
+  --text-faint: #9a9aa2;
+  --accent: #0169cc;
+  --accent-hover: #0158ad;
+  --accent-soft: rgba(1, 105, 204, 0.1);
+  --accent-line: rgba(1, 105, 204, 0.28);
+  --warn: #a5610c;
+  --warn-soft: rgba(165, 97, 12, 0.12);
+  --ok: #0a8f3c;
+  --on-ok: #ffffff;
+  --danger: #cd2622;
+  --link: #0a63b8;
+  --name: #2a2a2e;
+  --agent: #1c1c1e;
+  --code-bg: rgba(0, 0, 0, 0.055);
+  --purple: #7d3fc4;
+  --purple-soft: rgba(125, 63, 196, 0.12);
+  --scrim: rgba(0, 0, 0, 0.4);
+  --menu-bg: rgba(255, 255, 255, 0.98);
+  --shadow-color: rgba(0, 0, 0, 0.16);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sidebar-w: 284px;
+  --topbar-h: 52px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  /* ---- 夜间 ---- */
+  --bg: #111111;
+  --bg-sidebar: #131313;
+  --bg-elevated: #1a1a1a;
+  --bg-input: #1c1c1c;
+  --bg-hover: #1e1e1e;
+  --border: #2a2a2a;
+  --border-strong: #383838;
+  --text: #fcfcfc;
+  --text-dim: #8f8f8f;
+  --text-faint: #6b6b6b;
+  --accent: #0169cc;
+  --accent-hover: #1a7ee0;
+  --accent-soft: rgba(1, 105, 204, 0.16);
+  --accent-line: rgba(1, 105, 204, 0.3);
+  --warn: #f0a34a;
+  --warn-soft: rgba(240, 163, 74, 0.14);
+  --ok: #00a240;
+  --on-ok: #08281a;
+  --danger: #e02e2a;
+  --link: #5aa9f0;
+  --name: #dcdcdc;
+  --agent: #ececec;
+  --code-bg: rgba(0, 0, 0, 0.3);
+  --purple: #c79bf0;
+  --purple-soft: rgba(199, 155, 240, 0.16);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --menu-bg: rgba(24, 24, 24, 0.98);
+  --shadow-color: rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  -webkit-text-size-adjust: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  overscroll-behavior-y: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+#app {
+  display: flex;
+  height: 100%;
+  padding-top: env(safe-area-inset-top);
+}
+
+/* iOS Safari 收起工具栏时可见高度会变，用 dvh 让底部输入框和最新消息始终贴在可见区域底部 */
+@supports (height: 100dvh) {
+  html,
+  body {
+    height: 100dvh;
+  }
+}
+
+/* ---------- Sidebar ---------- */
+#sidebar {
+  width: var(--sidebar-w);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+
+#sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--topbar-h);
+  padding: 0 10px 0 16px;
+  flex: none;
+}
+
+#sidebar-brand {
+  flex: 1;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#sidebar-brand:active {
+  color: var(--text-dim);
+}
+
+#sidebar-refresh,
+#sidebar-close,
+#theme-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 16px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+#sidebar-refresh:active,
+#sidebar-close:active,
+#theme-button:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 外观切换：🌓 跟随手机系统 / ☀️ 白天 / 🌙 夜间（三个都是 emoji，风格一致）。
+   emoji 不受 color 影响，所以这里只调字号让它跟 ⟳ ✕ 差不多大。 */
+#theme-button {
+  font-size: 14px;
+  line-height: 1;
+}
+
+#sidebar-close {
+  display: none;
+}
+
+#sidebar-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 16px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+  flex: none;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+#sidebar-status.online .dot {
+  background: var(--ok);
+}
+
+#sidebar-status.offline .dot {
+  background: var(--danger);
+}
+
+#thread-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 12px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  flex: 1;
+  min-height: 0;
+}
+
+.thread-card {
+  padding: 9px 10px;
+  border-radius: 9px;
+  margin-bottom: 1px;
+  cursor: pointer;
+}
+
+.thread-card:active {
+  background: var(--bg-hover);
+}
+
+.thread-card.current {
+  background: var(--accent-soft);
+}
+
+.thread-card .row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.thread-card .name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--name);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thread-card.current .name {
+  color: var(--text);
+}
+
+.thread-card .preview {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thread-card .time {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex: none;
+  white-space: nowrap;
+}
+
+.badge {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex: none;
+}
+
+.badge.active {
+  background: var(--accent-soft);
+  color: var(--link);
+}
+
+.badge.waiting {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+#list-empty {
+  text-align: center;
+  color: var(--text-faint);
+  padding: 32px 20px;
+  font-size: 13px;
+  margin: 0;
+}
+
+/* ---------- Scrim (mobile) ---------- */
+#scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  z-index: 40;
+}
+
+/* ---------- Main pane ---------- */
+#main-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  position: relative;
+}
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--topbar-h);
+  flex: none;
+  padding: 0 8px 0 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* ---------- 连接延时 ---------- */
+/* 输入框旁边那颗（挨着「跟随电脑」），点开是同一个面板 */
+#composer-latency {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: none;
+  white-space: nowrap;
+}
+
+/* 输入框旁边那颗跟「跟随电脑」一样高，一行看起来才齐 */
+#composer-latency {
+  height: 26px;
+  padding: 0 8px;
+}
+
+#composer-latency:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.latency-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+/* 连不上时把圆点换成明确的警示图标，一眼看出不是「慢」而是「断了」。 */
+.latency-icon {
+  font-size: 12px;
+  line-height: 1;
+  flex: none;
+  color: var(--danger);
+}
+
+.latency-dot[hidden],
+.latency-icon[hidden] {
+  display: none;
+}
+
+#composer-latency.good .latency-dot {
+  background: var(--ok);
+}
+
+#composer-latency.fair .latency-dot {
+  background: var(--warn);
+}
+
+#composer-latency.poor .latency-dot {
+  background: var(--danger);
+}
+
+#composer-latency.good,
+#composer-latency.fair,
+#composer-latency.poor {
+  color: var(--text);
+}
+
+#latency-panel {
+  position: absolute;
+  right: 10px;
+  top: calc(var(--topbar-h) - 2px);
+  /* 从输入框旁边那颗打开时改成贴着输入框往上弹，bottom 由 JS 按输入框实际高度算 */
+  bottom: auto;
+  z-index: 55;
+  min-width: 208px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--menu-bg);
+  box-shadow: 0 12px 32px var(--shadow-color);
+  font-size: 12.5px;
+}
+
+.latency-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 3px 0;
+}
+
+.latency-row span:first-child {
+  color: var(--text-dim);
+}
+
+.latency-row span:last-child {
+  font-variant-numeric: tabular-nums;
+}
+
+#latency-hint {
+  margin: 7px 0 0;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+#latency-hint a {
+  color: var(--accent-hover);
+  text-decoration: underline;
+  word-break: break-all;
+}
+
+#sidebar-toggle,
+#refresh-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  font-size: 18px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+#sidebar-toggle {
+  display: none;
+}
+
+#sidebar-toggle:active,
+#refresh-button:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+#title-area {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+}
+
+#title {
+  font-weight: 600;
+  font-size: 14.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#subtitle {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#subtitle.online::before {
+  content: "● ";
+  color: var(--ok);
+}
+
+#subtitle.offline::before {
+  content: "● ";
+  color: var(--danger);
+}
+
+/* ---------- Thread ---------- */
+#thread-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#thread-meta {
+  flex: none;
+  padding: 7px 16px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#thread-meta:empty {
+  display: none;
+}
+
+#turns {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px 16px 28px;
+}
+
+#placeholder {
+  color: var(--text-faint);
+  text-align: center;
+  padding: 48px 24px;
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.turn {
+  margin-bottom: 20px;
+}
+
+/* 对话流底部的运行中指示：脉冲圆点 + 走动的计时，对齐桌面版。 */
+.turn-running {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -6px 0 14px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.turn-running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: run-pulse 1.2s ease-in-out infinite;
+}
+
+.turn-elapsed {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes run-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(0.75);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-running-dot {
+    animation: none;
+  }
+}
+
+.item {
+  margin-bottom: 10px;
+}
+
+.item-user {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 12px;
+  padding: 10px 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14.5px;
+}
+
+/* 挂在回显下面的一行小字：说明这条还没真正进会话（比如被电脑端占着、排队中）。 */
+.echo-tag {
+  margin: -4px 0 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.item-agent {
+  word-break: break-word;
+  font-size: 14.5px;
+  color: var(--agent);
+}
+
+.item-agent h1,
+.item-agent h2,
+.item-agent h3 {
+  font-size: 15px;
+  margin: 14px 0 6px;
+  color: var(--text);
+}
+
+.item-agent p {
+  margin: 0 0 8px;
+}
+
+.item-agent ul,
+.item-agent ol {
+  margin: 0 0 8px;
+  padding-left: 22px;
+}
+
+.item-agent code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--bg-input);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.item-agent pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+
+.item-agent pre code {
+  background: none;
+  padding: 0;
+}
+
+.item-agent a {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+/* ---------- 一键复制（代码块 / 命令输出 / 链接） ---------- */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 7px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.copy-btn:active,
+.copy-btn.copied {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* 图标是内联 SVG，跟着 currentColor 走；flex:none 免得被 flex 压扁 */
+.copy-btn .copy-icon {
+  display: block;
+  flex: none;
+}
+
+/* 代码块：按钮浮在右上角。手机上没法 hover，所以一直显示着，只是淡一点 */
+.code-block {
+  position: relative;
+}
+
+.code-block .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  opacity: 0.55;
+}
+
+.code-block .copy-btn:active,
+.code-block .copy-btn.copied {
+  opacity: 1;
+}
+
+/* 长地址本来就该断行，别被后面的按钮顶出去 */
+.md-link {
+  word-break: break-all;
+}
+
+.md-link .copy-btn,
+.md-code .copy-btn {
+  margin-left: 3px;
+  padding: 2px 4px;
+  font-size: 10px;
+  vertical-align: baseline;
+  opacity: 0.7;
+}
+
+/* 表格在手机上常常比屏幕宽，整块横向滚动，不撑破气泡 */
+.md-table {
+  overflow-x: auto;
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.md-table table {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 12.5px;
+}
+
+.md-table th,
+.md-table td {
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.md-table th:last-child,
+.md-table td:last-child {
+  border-right: none;
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.md-table th {
+  background: var(--bg-elevated);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.md-table td code {
+  white-space: nowrap;
+}
+
+details.block {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-sidebar);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+details.block > summary {
+  padding: 8px 11px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+details.block > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.block > summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  flex: none;
+}
+
+details.block[open] > summary::before {
+  content: "▾";
+}
+
+details.block > summary .status-ok {
+  color: var(--ok);
+}
+
+details.block > summary .status-bad {
+  color: var(--danger);
+}
+
+details.block .body {
+  border-top: 1px solid var(--border);
+  padding: 9px 11px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+details.reasoning > summary {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-list div {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.item-plan {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 11px;
+  font-size: 13px;
+}
+
+.item-plan .step {
+  display: flex;
+  gap: 8px;
+}
+
+.item-plan .step.done {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
+/* ---------- Approval ---------- */
+.approval {
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  border-radius: 12px;
+  padding: 11px 12px;
+  margin-bottom: 10px;
+}
+
+.approval .head {
+  font-size: 12px;
+  color: var(--warn);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.approval .detail {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--code-bg);
+  border-radius: 8px;
+  padding: 8px 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 32vh;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.approval .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.approval button {
+  flex: 1 1 auto;
+  min-width: 72px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: 13.5px;
+  font-weight: 600;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+}
+
+.approval button.primary {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--on-ok);
+}
+
+.approval button.danger {
+  color: var(--danger);
+}
+
+.approval button:disabled {
+  opacity: 0.5;
+}
+
+/* ---------- Composer ---------- */
+#composer {
+  flex: none;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+#composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+/* 运行中按「发送」挂起来的待发消息：浮在输入框上面，等这一轮跑完自动发出去 */
+#pending-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 7px;
+}
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  border: 1px dashed var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+
+.pending-tag {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--bg-hover);
+}
+
+.pending-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.pending-steer,
+.pending-remove {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+  background: transparent;
+}
+
+.pending-steer:active,
+.pending-remove:active {
+  background: var(--bg-hover);
+}
+
+.pending-remove {
+  padding: 3px 7px;
+  color: var(--text-faint);
+  border-color: transparent;
+  font-size: 11px;
+}
+
+/* ---------- 会话权限档位 ---------- */
+#composer-tools {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 7px;
+}
+
+#permission-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 100%;
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: none;
+}
+
+#permission-button:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+#permission-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+#permission-button.ask #permission-dot {
+  background: var(--accent);
+}
+
+#permission-button.auto #permission-dot {
+  background: var(--warn);
+}
+
+#permission-button.full #permission-dot,
+#permission-button.full {
+  color: var(--danger);
+}
+
+#permission-button.full #permission-dot {
+  background: var(--danger);
+}
+
+#permission-button.ask,
+#permission-button.auto {
+  color: var(--text);
+}
+
+#permission-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#permission-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 56;
+  width: min(320px, calc(100vw - 32px));
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: 0 16px 40px var(--shadow-color);
+}
+
+#permission-panel[hidden] {
+  display: none;
+}
+
+#permission-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 7px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+#permission-effective {
+  font-family: var(--mono);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.permission-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  border-radius: 9px;
+  text-align: left;
+}
+
+.permission-option:active {
+  background: var(--bg-hover);
+}
+
+.permission-option.active {
+  background: var(--bg-hover);
+}
+
+.permission-option .mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+.permission-option .mark.ask {
+  background: var(--accent);
+}
+
+.permission-option .mark.auto {
+  background: var(--warn);
+}
+
+.permission-option .mark.full {
+  background: var(--danger);
+}
+
+.permission-option .label {
+  font-size: 13px;
+  color: var(--text);
+  flex: none;
+}
+
+.permission-option .hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-option .check {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 13px;
+  flex: none;
+}
+
+#permission-note {
+  margin: 4px 6px 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+#message-input {
+  flex: 1;
+  /* 运行中一行会同时出现「引导 / 发送 / 中断」三个按钮，不设 min-width 的话
+     输入框按内容最小宽度撑开，整行会被挤出屏幕 */
+  min-width: 0;
+  resize: none;
+  max-height: 34vh;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  /* iOS 上聚焦字号小于 16px 的输入框会自动把页面放大，这里锁死 16px */
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+#message-input::placeholder {
+  color: var(--text-faint);
+}
+
+#message-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#send-button,
+#stop-button {
+  padding: 10px 16px;
+  border-radius: 11px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #ffffff;
+}
+
+#send-button:active {
+  background: var(--accent-hover);
+}
+
+#stop-button {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+#send-button:disabled {
+  opacity: 0.45;
+}
+
+/* 顶部「显示更早的」：会话太长时桥接只给最近 500 条，这里可以往回翻 */
+.older-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 10px;
+}
+
+.older-row button {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+
+.older-row button:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ---------- Toast ---------- */
+#toast.actionable {
+  cursor: pointer;
+  border-color: var(--accent);
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(84px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  background: rgba(28, 28, 28, 0.96);
+  border: 1px solid var(--border-strong);
+  color: #fff;
+  padding: 9px 15px;
+  border-radius: 10px;
+  font-size: 13px;
+  max-width: 88vw;
+  z-index: 60;
+}
+
+.cursor::after {
+  content: "▌";
+  color: var(--accent);
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 767px) {
+  #sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    padding-top: env(safe-area-inset-top);
+    transform: translateX(-100%);
+    transition: transform 0.24s ease;
+    box-shadow: 0 0 40px var(--shadow-color);
+  }
+
+  body.sidebar-open #sidebar {
+    transform: translateX(0);
+  }
+
+  #sidebar-close {
+    display: block;
+  }
+
+  #sidebar-toggle {
+    display: block;
+  }
+}
+
+@media (min-width: 768px) {
+  #turns {
+    padding: 20px 24px 32px;
+  }
+
+  #composer {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  #topbar {
+    padding: 0 14px 0 18px;
+  }
+}
+
+/* ---------- Chat images ---------- */
+.chat-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  margin: 8px 0;
+  background: var(--bg-elevated);
+}
+
+.msg-images {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.msg-images .chat-image {
+  margin: 0;
+}
+
+.item-user .chat-image {
+  border-color: var(--border-strong);
+}
+
+.image-note {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  word-break: break-all;
+}
+
+/* ---------- Attachments ---------- */
+#attach-strip {
+  display: flex;
+  gap: 8px;
+  padding: 2px 2px 8px;
+  overflow-x: auto;
+}
+
+/* 这里必须自己写 display:none —— 上面的 display:flex 会盖掉 UA 的
+   `[hidden] { display: none }`，结果带 hidden 的空行还杵在那占高度，
+   输入框上方凭空多出一截空白。 */
+#attach-strip[hidden],
+#pending-strip[hidden] {
+  display: none;
+}
+
+.attach-item {
+  position: relative;
+  flex: none;
+}
+
+.attach-item img {
+  width: 60px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+}
+
+.attach-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#attach-button {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  font-size: 18px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+}
+
+#attach-button:active {
+  background: var(--bg-hover);
+}
+
+#new-chat-button,
+#rename-button,
+#pin-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  font-size: 17px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+#new-chat-button:active,
+#rename-button:active,
+#pin-button:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.thread-card .pin {
+  color: var(--warn);
+  font-size: 12px;
+  flex: none;
+}
+
+/* ---------- Sidebar: new-chat entries and project groups ---------- */
+#sidebar-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 12px 8px;
+  flex: none;
+}
+
+#sidebar-actions button {
+  flex: 1;
+  height: 34px;
+  border-radius: 9px;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+#sidebar-actions button:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+#sidebar-new-ephemeral {
+  color: var(--purple) !important;
+}
+
+#project-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 4px 16px;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  flex: none;
+}
+
+#project-add {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 14px;
+  color: var(--text-faint);
+  flex: none;
+}
+
+#project-add:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px 3px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.group-head:active {
+  color: var(--text);
+}
+
+.group-head .chev {
+  width: 10px;
+  font-size: 9px;
+  color: var(--text-faint);
+  flex: none;
+}
+
+.group-head .group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.group-head .group-count {
+  font-size: 11px;
+  color: var(--text-faint);
+  flex: none;
+}
+
+/* 项目分组头上的「＋ 在项目下新建对话」 */
+.group-head .group-add {
+  width: 24px;
+  height: 24px;
+  margin-left: -2px;
+  border-radius: 7px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--bg-hover);
+  flex: none;
+}
+
+.group-empty {
+  padding: 2px 10px 6px 26px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.group-head .group-add:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.thread-card.in-group {
+  margin-left: 8px;
+}
+
+.badge.ephemeral {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+#ephemeral-close {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+  flex: none;
+}
+
+#ephemeral-close:active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ---------- New chat dialog ---------- */
+#new-chat-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+}
+
+#new-chat-modal[hidden] {
+  display: none;
+}
+
+#new-chat-card {
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  box-shadow: 0 18px 48px var(--shadow-color);
+}
+
+#new-chat-heading {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+#new-chat-name {
+  height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 16px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+}
+
+#new-chat-name:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#new-chat-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+#new-chat-permission-row,
+#new-chat-project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+#new-chat-permission,
+#new-chat-project {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  font: inherit;
+  font-size: 16px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+}
+
+#new-chat-permission:focus,
+#new-chat-project:focus {
+  border-color: var(--accent);
+}
+
+#new-chat-pin {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+#new-chat-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------- New project dialog (shares the new-chat styling) ---------- */
+#new-project-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+}
+
+#new-project-modal[hidden] {
+  display: none;
+}
+
+#new-project-card {
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  box-shadow: 0 18px 48px var(--shadow-color);
+}
+
+#new-project-card h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+#new-project-name,
+#new-project-path {
+  height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 16px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+}
+
+#new-project-name:focus,
+#new-project-path:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#new-project-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#new-project-actions button {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font-size: 14px;
+  color: var(--text-dim);
+  background: var(--bg-hover);
+}
+
+#new-project-create {
+  color: #ffffff !important;
+  background: var(--accent) !important;
+  font-weight: 500;
+}
+
+#new-chat-actions button {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font-size: 14px;
+  color: var(--text-dim);
+  background: var(--bg-hover);
+}
+
+#new-chat-create {
+  color: #ffffff !important;
+  background: var(--accent) !important;
+  font-weight: 500;
+}
+
+#new-chat-create:active {
+  background: var(--accent-hover) !important;
+}
