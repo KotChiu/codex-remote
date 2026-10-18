@@ -11,6 +11,8 @@ const state = {
   threads: [],
   currentThreadId: null,
   thread: null,
+  /* 刷新/切换会话后，在服务端把最新 turn 状态读回来之前，先别信旧的「运行中」 */
+  threadChecking: false,
   turns: [],
   pendingApprovals: new Map(),
   activeTurns: {},
@@ -665,11 +667,18 @@ function handleNotification(method, params) {
   if (method === 'thread/status/changed') {
     const thread = state.threads.find((candidate) => candidate.id === data.threadId);
     if (thread && data.status) thread.status = data.status;
+    if (state.thread && state.thread.id === data.threadId && data.status) {
+      state.thread.status = data.status;
+    }
     if (data.status && data.status.type === 'idle') {
       delete state.activeTurns[data.threadId];
+      syncThreadRunningFlag(data.threadId, false);
       flushPending(data.threadId);
+    } else if (data.status && data.status.type === 'active') {
+      syncThreadRunningFlag(data.threadId, true);
     }
     renderListQuiet();
+    if (data.threadId === state.currentThreadId) renderThread();
     return;
   }
 
@@ -685,11 +694,13 @@ function handleNotification(method, params) {
 
   if (method === 'turn/started' && data.threadId && data.turn && data.turn.id) {
     state.activeTurns[data.threadId] = data.turn.id;
+    syncThreadRunningFlag(data.threadId, true);
     renderListQuiet();
   } else if (method === 'turn/completed' && data.threadId) {
     if (!data.turn || state.activeTurns[data.threadId] === data.turn.id) {
       delete state.activeTurns[data.threadId];
     }
+    if (!state.activeTurns[data.threadId]) syncThreadRunningFlag(data.threadId, false);
     /* 跑完了，而你没在看这个会话（或者在后台）：在列表上留个未读点，点开自动清掉。
        回放临时会话的事件日志时不算（那是重新打开页面在复原内容，不是新回复）。 */
     if (!state.foldingEvents && (data.threadId !== state.currentThreadId || document.hidden)) {
@@ -1294,6 +1305,19 @@ function threadStatus(threadId) {
   return listed?.status?.type;
 }
 
+/* 「运行中」有两个来源：SSE 的 activeTurns 和 thread.status。中断、刷新、桥接重启
+   之后前者会先被清掉，后者却可能还是旧的 active，界面就会一直显示运行中。这里把
+   两边一起校准，别让任何一份旧状态单独决定界面。 */
+function syncThreadRunningFlag(threadId, running) {
+  if (!threadId) return;
+  const next = { type: running ? 'active' : 'idle' };
+  if (state.thread && state.thread.id === threadId) {
+    state.thread.status = Object.assign({}, state.thread.status, next);
+  }
+  const listed = state.threads.find((thread) => thread.id === threadId);
+  if (listed) listed.status = Object.assign({}, listed.status, next);
+}
+
 function loadCollapsedGroups() {
   try {
     const raw = localStorage.getItem('codex.collapsedGroups');
@@ -1809,6 +1833,8 @@ function renderPlaceholder() {
 function threadRunning(threadId) {
   const id = threadId || state.currentThreadId;
   if (!id) return false;
+  /* 刚刷新/刚切过来：先读服务端最新的 turns，不拿上一个页面的状态冒充「运行中」 */
+  if (state.threadChecking && id === state.currentThreadId) return false;
   if (state.activeTurns[id]) return true;
   const type = state.thread && state.thread.id === id ? state.thread.status?.type : null;
   if (type === 'active') return true;
@@ -2576,6 +2602,7 @@ function restoreDraft(threadId) {
 async function openThread(threadId, options) {
   const silent = Boolean(options && options.silent);
   if (!silent) {
+    state.threadChecking = true;
     const switching = state.currentThreadId !== threadId;
     if (switching && state.currentThreadId) saveDraft(state.currentThreadId);
     if (switching) restoreDraft(threadId);
@@ -2625,11 +2652,12 @@ async function openThread(threadId, options) {
     /* 服务端读回来的 turn 状态才算准：内存里的 activeTurns 跟它对齐一次。被中断的
        那一轮 daemon 不发 turn/completed，不校准的话界面会一直显示「运行中」，挂在
        输入框上面的待发消息也永远等不到自动发。 */
-    if (state.turns.length > 0) {
-      const runningTurn = [...state.turns].reverse().find((turn) => turn.status === 'inProgress');
-      if (runningTurn) state.activeTurns[threadId] = runningTurn.id;
-      else delete state.activeTurns[threadId];
-    }
+    const runningTurn = [...state.turns].reverse().find((turn) => turn.status === 'inProgress');
+    if (runningTurn) state.activeTurns[threadId] = runningTurn.id;
+    else delete state.activeTurns[threadId];
+    state.threadChecking = false;
+    syncThreadRunningFlag(threadId, Boolean(runningTurn));
+    renderListQuiet();
     finalizeEchoes();
     dom.title.textContent = (state.thread.name || state.thread.preview || '会话').slice(0, 60);
     dom.threadMeta.textContent = [state.thread.cwd, state.thread.model].filter(Boolean).join(' · ');
@@ -2645,6 +2673,7 @@ async function openThread(threadId, options) {
       pinToBottomSoon();
     }
   } catch (error) {
+    state.threadChecking = false;
     if (!silent) {
       dom.turns.innerHTML = '<p style="color:var(--danger)">载入失败：' + escapeHtml(error.message) + '</p>';
       /* 用户亲自点开却读不到，这个信号比后台探测可信得多；连点两次就把这条幽灵
@@ -2783,6 +2812,8 @@ async function deliverMessage(threadId, text, attachments, options) {
       'queued-' + Date.now();
     if (result && (result.mode === 'started' || result.mode === 'steered')) {
       state.activeTurns[threadId] = turnId;
+      syncThreadRunningFlag(threadId, true);
+      renderListQuiet();
     }
     if (echo) {
       echo.turnId = turnId;
@@ -2983,6 +3014,8 @@ async function interrupt() {
     });
     /* 中断成功这一轮马上就结束了；本地先撤掉「运行中」，挂着的待发消息不用干等通知 */
     delete state.activeTurns[threadId];
+    syncThreadRunningFlag(threadId, false);
+    renderList();
     renderThread();
     setTimeout(() => {
       flushPending(threadId);
