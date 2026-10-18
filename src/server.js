@@ -46,7 +46,11 @@ const DEFAULT_PERMISSION_FILE = path.join(os.homedir(), '.codex-remote', 'permis
 /* turn/steer 的 expectedTurnId 对不上（这一轮刚好跑完、或者已经换轮了）时的报错都长这样；
    这些情况下引导没意义，退回正常发送即可。 */
 const STEER_MISS_PATTERN = /expectedturnid|expected turn|no active turn|not active|turn not found|already (?:finished|completed)/i;
-const BRIDGE_VERSION = '1.8.1';
+const BRIDGE_VERSION = '1.8.3';
+/* 延时探测别被 Codex 的忙闲拖住：HTTP 最多等 350ms，超了先用上一次采样；
+   采样 1.5 秒内算新鲜，不必重复问 daemon。 */
+const DAEMON_PROBE_DEADLINE_MS = 350;
+const DAEMON_SAMPLE_TTL_MS = 1500;
 /* 临时会话的对话内容不落盘、也不支持 thread/read(includeTurns)，
    所以桥接层自己按序缓存它的事件，重开页面时前端再回放一遍。 */
 const EPHEMERAL_EVENT_LIMIT = 4000;
@@ -464,8 +468,61 @@ class Bridge {
     /* daemon 报回来的「实际生效」设置，用来在电脑上改过之后仍然显示真实状态 */
     this.threadSettings = new Map();
     this.reconnectTimer = null;
+    /* 最近一次「电脑 ↔ Codex」探测结果；busy 时拿它兜底，别让 /api/ping 跟着卡 */
+    this.daemonLatency = null;
+    this.daemonProbe = null;
+    /* 探测失败（Codex 忙/卡住）之后先别连着再问，避免探测本身把 daemon 压得更忙 */
+    this.daemonProbeBackoffUntil = 0;
     this.rollout = new RolloutWatcher();
     this.rollout.start((threadId, snapshot, previous) => this._handleRolloutState(threadId, snapshot, previous));
+  }
+
+  /* Codex 忙的时候（正跑着好几轮），thread/loaded/list 会被排在后面，三次探测
+     可能要好几秒 —— 那是 Codex 忙，不是链路慢。探测放到后台跑（同一时间只有
+     一份），HTTP 最多等 deadlineMs，等不到就用上一次的采样，数字照常更新。 */
+  async _daemonLatencySample(deadlineMs) {
+    /* 上一轮探测刚失败过：先用手里的旧采样，过几秒再试，别在 Codex 忙的时候添乱 */
+    if (!this.daemonProbe && Date.now() < this.daemonProbeBackoffUntil && this.daemonLatency) {
+      return null;
+    }
+    if (!this.daemonProbe) {
+      const probe = (async () => {
+        const samples = [];
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const probeStart = process.hrtime.bigint();
+          await this.connection.request('thread/loaded/list', {}, { timeoutMs: 1200 });
+          samples.push(roundMs(probeStart));
+        }
+        return { ok: true, ms: Math.min(...samples), error: null, at: Date.now() };
+      })()
+        .catch((error) => ({ ok: false, ms: null, error: error.message, at: Date.now() }))
+        .then((sample) => {
+          if (sample.ok) {
+            this.daemonLatency = sample;
+            this.daemonProbeBackoffUntil = 0;
+          } else {
+            /* 保留上一次成功的采样，界面继续显示它；同时退避几秒 */
+            this.daemonProbeBackoffUntil = Date.now() + 5000;
+          }
+          return sample;
+        })
+        .finally(() => {
+          this.daemonProbe = null;
+        });
+      this.daemonProbe = probe;
+    }
+    const current = this.daemonProbe;
+    let timer = null;
+    try {
+      return await Promise.race([
+        current,
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(null), deadlineMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async start() {
@@ -481,7 +538,7 @@ class Bridge {
       server.listen(this.options.port, this.options.host, resolve);
     });
 
-    /* Node 默认空闲 5 秒就关连接，而界面每 15 秒才探一次延时 —— 于是每次探测
+    /* Node 默认空闲 5 秒就关连接，而界面每 5 秒才探一次延时 —— 于是每次探测
        都得新建 TCP 连接，白白多一整个 RTT（远端路径上一两百毫秒）。把连接留热，
        探测数字才是真实往返，其它 API 调用也各少一个 RTT。 */
     server.keepAliveTimeout = 65000;
@@ -938,18 +995,40 @@ class Bridge {
           daemon: { ok: false, ms: null, error: null },
         };
         if (payload.connected) {
-          try {
+          const cached = this.daemonLatency;
+          if (cached && Date.now() - cached.at < DAEMON_SAMPLE_TTL_MS) {
+            payload.daemon = {
+              ok: cached.ok,
+              ms: cached.ms,
+              error: cached.error,
+              cached: false,
+              busy: false,
+            };
+          } else {
             /* 连着问三次取最小值：单次调用偶尔会被 daemon 的其它活儿拖慢，
-               这不是链路延时，取最小值更接近真实往返。 */
-            const samples = [];
-            for (let attempt = 0; attempt < 3; attempt += 1) {
-              const probeStart = process.hrtime.bigint();
-              await this.connection.request('thread/loaded/list', {});
-              samples.push(roundMs(probeStart));
+               这不是链路延时，取最小值更接近真实往返。等不到就用上次的。 */
+            const sample = await this._daemonLatencySample(DAEMON_PROBE_DEADLINE_MS);
+            if (sample && sample.ok) {
+              payload.daemon = { ok: true, ms: sample.ms, error: null, cached: false };
+            } else if (cached) {
+              /* 这次没测到（Codex 忙 / 探测卡住）：显示上次的，并标明「忙」，
+                 别让界面误报成 Codex 掉线 */
+              payload.daemon = {
+                ok: true,
+                ms: cached.ms,
+                error: null,
+                cached: true,
+                busy: !(sample && sample.ok),
+              };
+            } else {
+              payload.daemon = {
+                ok: false,
+                ms: null,
+                error: (sample && sample.error) || 'Codex 正忙，稍后再测',
+                cached: false,
+                busy: true,
+              };
             }
-            payload.daemon = { ok: true, ms: Math.min(...samples), error: null };
-          } catch (error) {
-            payload.daemon = { ok: false, ms: roundMs(startedAt), error: error.message };
           }
         } else {
           payload.daemon.error = this.connectionError || 'app-server not connected';
@@ -973,6 +1052,9 @@ class Bridge {
         if (path === 'tailscale') {
           payload.client.tailscale = tailscaleClientInfo(remoteAddress);
         }
+        /* 服务端自己处理这次请求花了多久：手机端用它把「链路往返」从总耗时里减掉，
+           免得 Codex 一忙，连链路延时也跟着看起来变高。 */
+        payload.serverMs = roundMs(startedAt);
         sendJson(response, 200, payload);
         return;
       }

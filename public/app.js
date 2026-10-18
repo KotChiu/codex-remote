@@ -994,6 +994,7 @@ function renderLatencyButton(button, dot, icon, text, info) {
     text.textContent = info.daemonOk ? Math.round(info.totalMs) + 'ms' : '无 Codex';
     button.title =
       '手机 ↔ 电脑 ' + Math.round(info.lanMs) + 'ms · 电脑 ↔ Codex ' + formatMs(info.daemonMs) +
+      (info.daemonCached ? '（上次）' : '') +
       (info.daemonOk ? ' · 点击看详情' : ' · ' + info.daemonError);
   }
   /* 断线不该只靠颜色区分（色弱、强光下都看不出来），换成明确的图标。 */
@@ -1013,7 +1014,8 @@ function renderLatency() {
   );
   if (!info) return;
   dom.latencyLan.textContent = info.ok ? Math.round(info.lanMs) + ' ms' : '⚠ 连不上';
-  dom.latencyDaemon.textContent = info.daemonOk ? formatMs(info.daemonMs) : '⚠ 未连接';
+  dom.latencyDaemon.textContent =
+    (info.daemonOk ? formatMs(info.daemonMs) : '⚠ 未连接') + (info.daemonCached ? '（上次）' : '');
   dom.latencyDaemon.title = info.daemonError || '';
   dom.latencyPath.textContent = info.ok ? latencyPathLabel(info.client) : '—';
   dom.latencyPath.title = info.ok ? latencyPathTitle(info.client) : '';
@@ -1042,29 +1044,47 @@ function noteBridgeVersion(version) {
   });
 }
 
+/* 每次采样带个序号：慢请求回来的时候如果已经有更新的采样了，就直接丢掉，
+   免得旧的（更慢的）数值覆盖掉刚测到的新值 —— 那会让人觉得数字卡住不动。 */
+let latencySeq = 0;
+
 async function measureLatency() {
+  const seq = ++latencySeq;
   const started = performance.now();
+  /* 链路断了的时候 fetch 可能卡几十秒；不给上限的话，界面会一直挂着上一个数。
+     3 秒还没回来就当这次失败（显示「离线」），下一拍继续测。 */
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timeout = setTimeout(() => {
+    if (controller) controller.abort();
+  }, 3000);
   try {
-    const result = await api('/api/ping');
+    const result = await api('/api/ping', controller ? { signal: controller.signal } : undefined);
+    if (seq !== latencySeq) return;
     const totalMs = performance.now() - started;
     const daemonMs = Number.isFinite(result?.daemon?.ms) ? result.daemon.ms : null;
+    /* 服务端处理这次请求花的时间（含它问 Codex 的那一下）。总耗时减掉它，
+       剩下的才是手机 ↔ 电脑这段链路，Codex 忙的时候不会把链路延时一起抬高。 */
+    const serverMs = Number.isFinite(result?.serverMs) ? result.serverMs : daemonMs || 0;
     noteBridgeVersion(result?.version || null);
     state.latency = {
       ok: true,
       at: Date.now(),
       totalMs,
-      lanMs: Math.max(0, totalMs - (daemonMs || 0)),
+      serverMs,
+      lanMs: Math.max(0, totalMs - serverMs),
       daemonMs: daemonMs || 0,
       daemonOk: Boolean(result?.daemon?.ok),
       daemonError: result?.daemon?.error || null,
+      daemonCached: Boolean(result?.daemon?.cached),
       version: result?.version || null,
       client: result?.client || null,
     };
   } catch (error) {
+    if (seq !== latencySeq) return;
     state.latency = {
       ok: false,
       at: Date.now(),
-      error: error.message,
+      error: error && error.name === 'AbortError' ? '超时' : error.message,
       totalMs: null,
       lanMs: null,
       daemonMs: null,
@@ -1073,6 +1093,8 @@ async function measureLatency() {
       version: null,
       client: null,
     };
+  } finally {
+    clearTimeout(timeout);
   }
   renderLatency();
 }
@@ -1089,6 +1111,8 @@ function anchorLatencyPanel() {
 function toggleLatencyPanel(show) {
   const next = show === undefined ? dom.latencyPanel.hidden : show;
   dom.latencyPanel.hidden = !next;
+  /* 节奏跟面板状态走：开着 2 秒一拍，收起恢复 5 秒 */
+  scheduleLatency();
   if (!next) return;
   anchorLatencyPanel();
   measureLatency();
@@ -3235,16 +3259,23 @@ loadPermissions();
 loadProjects();
 loadThreads().then(restoreLastThread);
 measureLatency();
+scheduleLatency();
 
 setInterval(() => {
   if (document.hidden) return;
   loadThreads();
 }, 10000);
 
-setInterval(() => {
-  if (document.hidden) return;
-  measureLatency();
-}, 15000);
+/* 延时是「采样」不是「连续值」：间隔太长，数字看起来就是卡住的。
+   面板开着的时候 2 秒一拍（盯着看是实时的），平时 5 秒一拍。 */
+function scheduleLatency() {
+  clearTimeout(scheduleLatency.timer);
+  const delay = dom.latencyPanel.hidden ? 5000 : 2000;
+  scheduleLatency.timer = setTimeout(() => {
+    if (!document.hidden) measureLatency();
+    scheduleLatency();
+  }, delay);
+}
 
 setInterval(tickRunTimer, 1000);
 

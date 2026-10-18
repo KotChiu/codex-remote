@@ -213,7 +213,7 @@ What you can do:
   and only the matching element is refreshed, at most every 120ms (`scheduleDeltaFlush` / `flushItemDelta`); a full
   re-render only happens on real structural changes such as `item/started` and `item/completed`.
 - **The desktop nudges you to refresh**: this page can stay open on a phone for days while the bridge on the computer
-  gets redeployed. The 15-second latency probe carries the bridge version (`/api/ping`'s `version`); when it differs
+  gets redeployed. The latency probe every 2–5 seconds carries the bridge version (`/api/ping`'s `version`); when it differs
   from the version the page loaded with, you get "The computer is now running vX — tap to refresh" (that toast does
   not auto-dismiss; tap it to reload), so you do not have to guess why a new feature is missing.
 - **Page name**: the top of the sidebar shows this machine (hostname by default); tap it to rename — handy with
@@ -222,8 +222,11 @@ What you can do:
   phone ↔ computer round trip. Green <80ms / yellow <250ms / red (or "no Codex") means the link or Codex has a
   problem. Tap it for details: `phone ↔ computer`, `computer ↔ Codex` (via `/api/ping`, using the side-effect-free
   `thread/loaded/list` three times and taking the minimum), **ingress path**, live-push state, check time, bridge
-  version. It measures on page load, every 15 seconds, and when returning from the background; nothing is sent while
-  the page is hidden. The ingress path is derived server-side from the client's source address (local / LAN /
+  version. It measures on page load, every 2 seconds while the panel is open (every 5 seconds when it is closed), and
+  when returning from the background; nothing is sent while the page is hidden. A probe that takes longer than
+  3 seconds is treated as offline, so the chip never sits on a stale number. While Codex is busy the probe waits at
+  most 350ms; if it cannot get a fresh sample it reuses the last successful value and marks it “(last)”, so Codex
+  queueing is never reported as link latency. The ingress path is derived server-side from the client's source address (local / LAN /
   Tailscale / remote). On a Tailscale path the bridge reads the peer's `CurAddr` from `tailscale status --json`
   (the GUI CLI is auto-detected, or set `TAILSCALE_CLI`) and shows **Tailscale direct**,
   **Tailscale Peer Relay**, or **⚠ Tailscale relay · XXX**. A DERP path means hole punching failed (measured
