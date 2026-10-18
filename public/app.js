@@ -1402,10 +1402,7 @@ function threadCard(thread, options) {
     (thread.id === state.currentThreadId ? ' current' : '') +
     (indented ? ' in-group' : '');
 
-  const running =
-    Boolean(state.activeTurns[thread.id]) ||
-    thread.status?.type === 'active' ||
-    threadStatus(thread.id) === 'active';
+  const running = threadRunning(thread.id);
   const waiting = [...state.pendingApprovals.values()].some(
     (record) => record.params && record.params.threadId === thread.id
   );
@@ -2653,10 +2650,17 @@ async function openThread(threadId, options) {
        那一轮 daemon 不发 turn/completed，不校准的话界面会一直显示「运行中」，挂在
        输入框上面的待发消息也永远等不到自动发。 */
     const runningTurn = [...state.turns].reverse().find((turn) => turn.status === 'inProgress');
-    if (runningTurn) state.activeTurns[threadId] = runningTurn.id;
-    else delete state.activeTurns[threadId];
+    if (state.turns.length > 0) {
+      if (runningTurn) state.activeTurns[threadId] = runningTurn.id;
+      else delete state.activeTurns[threadId];
+      syncThreadRunningFlag(threadId, Boolean(runningTurn));
+    } else if (!state.thread.status || state.thread.status.type !== 'active') {
+      /* 空 turns 可能是老会话不支持 includeTurns，不能当成「没在跑」；
+         只有服务端明确说不是 active 时，才把本地缓存清掉。 */
+      delete state.activeTurns[threadId];
+      syncThreadRunningFlag(threadId, false);
+    }
     state.threadChecking = false;
-    syncThreadRunningFlag(threadId, Boolean(runningTurn));
     renderListQuiet();
     finalizeEchoes();
     dom.title.textContent = (state.thread.name || state.thread.preview || '会话').slice(0, 60);
