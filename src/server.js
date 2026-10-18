@@ -45,7 +45,7 @@ const DEFAULT_PERMISSION_FILE = path.join(os.homedir(), '.codex-remote', 'permis
 /* turn/steer 的 expectedTurnId 对不上（这一轮刚好跑完、或者已经换轮了）时的报错都长这样；
    这些情况下引导没意义，退回正常发送即可。 */
 const STEER_MISS_PATTERN = /expectedturnid|expected turn|no active turn|not active|turn not found|already (?:finished|completed)/i;
-const BRIDGE_VERSION = '1.7.14';
+const BRIDGE_VERSION = '1.7.15';
 /* 临时会话的对话内容不落盘、也不支持 thread/read(includeTurns)，
    所以桥接层自己按序缓存它的事件，重开页面时前端再回放一遍。 */
 const EPHEMERAL_EVENT_LIMIT = 4000;

@@ -2241,7 +2241,7 @@ function openNewChatPanel(options) {
   dom.newChatCwd.value = presetCwd;
   renderProjectOptions(presetCwd);
   dom.newChatPermission.value = 'default';
-  dom.newChatPin.checked = true;
+  dom.newChatPin.checked = false;
   dom.newChatHeading.textContent = preset.projectName
     ? '在「' + preset.projectName + '」下新建对话'
     : '新建对话';
@@ -2267,7 +2267,7 @@ async function createThread(options) {
   const cwd = (options.cwd || '').trim();
   const permission = options.permission || 'default';
   const ephemeral = options.ephemeral === true;
-  const shouldPin = options.pin !== false && !ephemeral;
+  const shouldPin = options.pin === true && !ephemeral;
   dom.newChatButton.disabled = true;
   try {
     const result = await api('/api/new-thread', {

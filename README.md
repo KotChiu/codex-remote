@@ -128,8 +128,8 @@ What you can do:
   session (`already has an active writer`), the bridge falls back to `codex queue` and runs it once the current turn ends.
 - **Approval cards**: when Codex asks to run a command or edit files, the phone shows Allow / Allow for this session /
   Deny / Deny and interrupt.
-- **New chat / rename / pin**: ＋ in the title bar creates a chat (default location `~/Documents/Codex/chat`, with an
-  optional "pin" checkbox); ✎ renames; ☆/★ pins. Pinned sessions sit at the top with a ★, handy for a "fixed window"
+- **New chat / rename / pin**: ＋ in the title bar creates a chat (default location `~/Documents/Codex/chat`; new chats are
+  not pinned unless you tick "pin"); ✎ renames; ☆/★ pins. Pinned sessions sit at the top with a ★, handy for a "fixed window"
   (a daily-notes chat, say). Pins and new chats are stored in the browser's `localStorage` (`codex.pinned` /
   `codex.shelved`) and only apply to that browser. The `codex.shelved` list (sessions created but not yet indexed by
   the daemon) is verified periodically: 10 minutes after creation it does a lightweight `?limit=1` read, and only
