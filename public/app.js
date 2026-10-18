@@ -991,7 +991,9 @@ function renderLatencyButton(button, dot, icon, text, info) {
     button.title = '连不上桥接：' + info.error;
   } else {
     button.className = info.daemonOk ? latencyGrade(info.totalMs) : 'poor';
-    text.textContent = info.daemonOk ? Math.round(info.totalMs) + 'ms' : '无 Codex';
+    /* 这颗按钮代表的是「手机 ↔ 电脑」这一段；电脑问 Codex 的时间单独在面板里看，
+       否则 Codex 一忙，链路延时也跟着变大。 */
+    text.textContent = info.daemonOk ? Math.round(info.lanMs) + 'ms' : '无 Codex';
     button.title =
       '手机 ↔ 电脑 ' + Math.round(info.lanMs) + 'ms · 电脑 ↔ Codex ' + formatMs(info.daemonMs) +
       (info.daemonCached ? '（上次）' : '') +
