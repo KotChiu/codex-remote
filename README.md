@@ -109,6 +109,9 @@ What you can do:
 - **Session view**: your messages, agent replies (Markdown), reasoning, command executions (command + exit code + output),
   file changes, plans.
 - Keep going with the composer at the bottom; press **Interrupt** while a turn is running.
+- **Unread dot**: when a session finishes a turn while you are not looking at it (or the page is in the background),
+  a small blue dot appears in front of its name in the list; opening that session clears it. The state lives in the
+  browser's `localStorage` (`codex.unread`), so it survives a refresh.
 - **Running timer**: like the desktop app, the timer lives in the conversation, not next to the composer — beneath the
   running turn you see `● Running 1:23` (pulsing dot + ticking clock). The baseline is the server's `turn.startedAt`
   (falling back to the moment the bridge first saw the turn start); formats are `0:12` / `1:23` / `1:02:03`.
@@ -221,9 +224,13 @@ What you can do:
   `thread/loaded/list` three times and taking the minimum), **ingress path**, live-push state, check time, bridge
   version. It measures on page load, every 15 seconds, and when returning from the background; nothing is sent while
   the page is hidden. The ingress path is derived server-side from the client's source address (local / LAN /
-  Tailscale / remote). If it says **Tailscale relay**, the phone is not on the LAN — it comes in over Tailscale's
-  100.64/10 range without a direct path (measured `relay "tok"`: 200ms+ one way) — so the panel offers a tokenized
-  LAN URL; tap it while the phone and computer share a Wi-Fi network and latency drops to single-digit milliseconds.
+  Tailscale / remote). On a Tailscale path the bridge reads the peer's `CurAddr` from `tailscale status --json`
+  (the GUI CLI is auto-detected, or set `TAILSCALE_CLI`) and shows **Tailscale direct**,
+  **Tailscale Peer Relay**, or **⚠ Tailscale relay · XXX**. A DERP path means hole punching failed (measured
+  `relay "tok"`: 105ms round trip),
+  so the panel suggests checking UDP 41641 / UPnP and, for hard NATs, configuring a Peer Relay on a low-latency VPS
+  with Tailscale 1.86+. It also offers a tokenized LAN URL; tap it while the phone and computer share a Wi-Fi network
+  and latency drops to single-digit milliseconds.
   When disconnected, colour is not the only signal (colour-blind users, bright sunlight): the dot becomes a red **⚠**
   and the affected rows read `⚠ unreachable` / `⚠ disconnected` / `⚠ interrupted, reconnecting`.
 
@@ -288,6 +295,14 @@ Logs: `~/.codex-remote/bridge.log`
 | A message lands below the answer / the answer appears above the message | The bridge used to append the echo of a message the daemon had not recorded yet to the end of the stream, so it looked like the answer came first. Echoes are now inserted back into their own turn: when you steer into a running turn (the daemon only records it on the next model turn, measured at tens of seconds), the message stays where you sent it and later output follows below. |
 | Tapping a link in a reply does nothing | The page handles link clicks itself (opens a new tab); if an embedded browser blocks new tabs too, long-press the link and copy the address into a browser |
 | "no rollout found" | The session id does not exist (usually a stale list); refresh the list |
+| Tailscale says relay | Run `tailscale netcheck` and check `UDP`, `MappingVariesByDestIP`, and `PortMapping`; run `tailscale ping <peer-ip>` and look for `via <ip>:port` (direct) vs `via DERP(...)`. Allow UDP 41641 on both ends and enable UPnP/NAT-PMP; when a hard NAT prevents hole punching, use Tailscale 1.86+ and configure a low-latency VPS as a Peer Relay |
+
+### Tailscale speed-up
+
+- Check the result first: `tailscale ping <peer Tailscale IP>`. `via <ip>:port` is direct; `via DERP(tok)` is relayed.
+- In `tailscale netcheck`, look for `UDP: true`, `MappingVariesByDestIP: false`, and a non-empty `PortMapping`. Allow UDP 41641 on both ends; enable UPnP/NAT-PMP on the router or give one end a static port mapping.
+- If both sides are behind hard NATs, upgrade both to Tailscale 1.86+, run `tailscale set --relay-server-port=40000` on a low-latency VPS, and grant it `tailscale.com/cap/relay` in the tailnet policy. DERP still handles negotiation, but relayed traffic prefers the Peer Relay.
+- When the phone and computer share a Wi-Fi network, always use the LAN address; even a direct Tailscale path cannot beat it.
 | Latency stays above 200ms | The phone is probably on a Tailscale relay, not the LAN: open the latency panel, check "ingress path", and use the LAN link it offers |
 | A permission profile is set on the phone but approvals still appear | The profile applies to the **next message**; if the desktop owns that session, `thread/resume` is rejected with `active writer` and the profile cannot be applied — send again after that turn ends |
 

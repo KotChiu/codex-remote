@@ -105,6 +105,8 @@ token 保存在 `~/.codex-remote/token`（权限 600）。
 - 侧边栏会话列表：名称、预览、运行状态（运行中 / 待审批）、相对时间；当前会话高亮。
 - 会话详情：用户消息、Agent 回复（Markdown）、思考过程、命令执行（命令 + 退出码 + 输出）、文件改动、计划。
 - 底部输入框继续发指令；任务运行时可以「中断」。
+- **未读小圆点**：某个会话跑完一轮时你没在看它（或者页面在后台），列表里它名字前面会出现一个蓝色小圆点，
+  点开这个会话就自动清掉。状态存在浏览器 `localStorage`（`codex.unread`），刷新页面也还在。
 - **运行中计时**：对齐桌面版，计时长在会话里、不在输入框旁边 —— 正在跑的那一轮下面是
   `● 运行中 1:23`（脉冲圆点 + 走动的计时）。基准取服务端的 `turn.startedAt`（拿不到就用
   第一次看到它开始跑的时刻兜底），格式 `0:12` / `1:23` / `1:02:03`；一秒一跳、只改那一个
@@ -211,8 +213,11 @@ token 保存在 `~/.codex-remote/token`（权限 600）。
   `thread/loaded/list` 连问三次取最小值）、**接入路径**、实时推送状态、检查时间、桥接版本。
   进页面、每 15 秒、以及从后台切回来时各测一次，页面不可见时不发请求。
   「接入路径」是服务端按客户端源地址算出来的（本机直连 / 局域网 / Tailscale / 远端）。
-  如果显示 **Tailscale 中继**，说明手机没走局域网，而是从 Tailscale 的 100.64/10 段进来、
-  且没打通直连（本机实测过 `relay "tok"`，单程 200ms 起）—— 面板里会直接给出带 token 的
+  走 Tailscale 时，桥接会调用本机 Tailscale CLI 读 `status --json` 里该 Peer 的 `CurAddr`：
+  **Tailscale 直连** 表示打洞成功；**Tailscale Peer Relay** 表示走自己的公网中继；
+  **⚠ Tailscale 中继 · XXX** 表示打洞失败、正在走 DERP（本机实测 `relay "tok"` 往返 105ms）。
+  这个判断不是只看 100.64/10 网段；CLI 不可用时只显示「Tailscale · 状态未知」，不影响延时测量。
+  走 DERP 时会提示检查 UDP 41641 / UPnP，并给出带 token 的
   局域网地址链接，手机和电脑在同一个 Wi-Fi 时点一下就能切过去，延时会掉到个位数毫秒。
   连不上时不再只靠颜色区分（色弱、强光下看不出来）：那个圆点会换成红色的 **⚠**，
   面板里对应几行也带 ⚠（`⚠ 连不上` / `⚠ 未连接` / `⚠ 中断，重连中`）。
@@ -275,7 +280,15 @@ token 保存在 `~/.codex-remote/token`（权限 600）。
 | 点了回复里的链接没反应 | 页面自己接管了链接点击（新标签打开）；若是内嵌浏览器把新标签也拦了，长按链接复制地址到浏览器里开 |
 | 提示「no rollout found」 | 会话 id 不存在（多为列表过期），回列表刷新即可 |
 | 延时一直 200ms 以上 | 多半是手机走了 Tailscale 中继而不是局域网：点延时按钮看「接入路径」，用面板里的局域网链接重开一次 |
+| Tailscale 显示中继 | `tailscale netcheck` 看 `UDP`、`MappingVariesByDestIP`、`PortMapping`；`tailscale ping <对端IP>` 看是 `via <ip>:port` 还是 `via DERP(...)`。两端放行 UDP 41641、路由器开 UPnP/NAT-PMP；硬 NAT 无法打洞时，用 Tailscale ≥ 1.86 把国内低延迟 VPS 配成 Peer Relay |
 | 手机上设了权限档位但还在弹审批 | 档位只对「下一条消息」生效；若那个会话正被电脑占用，`thread/resume` 会被 `active writer` 挡掉，档位下发不进去，等这轮跑完再发 |
+
+### Tailscale 提速
+
+- 先判断打洞结果：`tailscale ping <对端 Tailscale IP>`。输出 `via <ip>:port` 是直连；`via DERP(tok)` 是中继。
+- `tailscale netcheck` 重点看 `UDP: true`、`MappingVariesByDestIP: false`、`PortMapping` 非空。两端都要放行 UDP 41641；路由器开 UPnP/NAT-PMP，或给其中一端做固定端口映射。
+- 硬 NAT 打不通时，两端升级到 Tailscale ≥ 1.86，在国内低延迟 VPS 上执行 `tailscale set --relay-server-port=40000`，并在 tailnet policy 里给它 `tailscale.com/cap/relay` grant。DERP 仍负责协商，但中继流量会优先走 Peer Relay。
+- 手机和电脑在同一个 Wi-Fi 时，永远优先用局域网地址，Tailscale 直连也比不过局域网。
 
 ## 文件
 

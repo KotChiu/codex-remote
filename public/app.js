@@ -23,6 +23,8 @@ const state = {
   flushing: {},
   lastEventAt: 0,
   pinned: [],
+  /* 跑完一轮但你没在看那个会话时留下的未读点（threadId 列表，存 localStorage） */
+  unread: [],
   shelvedThreads: [],
   turnDiffs: new Map(),
   planSteps: new Map(),
@@ -688,6 +690,11 @@ function handleNotification(method, params) {
     if (!data.turn || state.activeTurns[data.threadId] === data.turn.id) {
       delete state.activeTurns[data.threadId];
     }
+    /* 跑完了，而你没在看这个会话（或者在后台）：在列表上留个未读点，点开自动清掉。
+       回放临时会话的事件日志时不算（那是重新打开页面在复原内容，不是新回复）。 */
+    if (!state.foldingEvents && (data.threadId !== state.currentThreadId || document.hidden)) {
+      markUnread(data.threadId);
+    }
     renderListQuiet();
     /* 这一轮结束了：挂在输入框上面的那条自动发出去 */
     flushPending(data.threadId);
@@ -863,29 +870,110 @@ function formatMs(value) {
 const PATH_LABELS = {
   local: '本机直连',
   lan: '局域网直连',
-  tailscale: 'Tailscale 中继',
+  tailscale: 'Tailscale',
   other: '远端',
 };
 
-/* 走 Tailscale 时延基本都在 200ms 起（实测是 DERP 中继，不是直连），
-   这时候最有用的一句话是「换成局域网地址」。 */
+function tailscalePathLabel(client) {
+  const status = client && client.tailscale;
+  if (!status) return 'Tailscale';
+  if (status.pending) return 'Tailscale · 检测中';
+  if (!status.available) return 'Tailscale · 状态未知';
+  if (status.self) return 'Tailscale 本机';
+  const peer = status.peer;
+  if (!peer) return 'Tailscale · 未知节点';
+  if (peer.direct) return 'Tailscale 直连';
+  if (peer.peerRelay) return 'Tailscale Peer Relay';
+  return '⚠ Tailscale 中继' + (peer.relay ? ' · ' + String(peer.relay).toUpperCase() : '');
+}
+
+function latencyPathLabel(client) {
+  if (!client) return '—';
+  if (client.path === 'tailscale') return tailscalePathLabel(client);
+  return PATH_LABELS[client.path] || '—';
+}
+
+function latencyPathTitle(client) {
+  if (!client) return '';
+  if (client.path !== 'tailscale') return client.ip || '';
+  const status = client.tailscale;
+  if (!status) return client.ip || '';
+  if (!status.available) return status.error || client.ip || '';
+  if (status.self) return '本机 Tailscale 地址：' + (client.ip || '');
+  const peer = status.peer;
+  if (!peer) return 'Tailscale 节点：' + (client.ip || '');
+  const route = peer.direct
+    ? '直连 ' + (peer.endpoint || 'P2P')
+    : peer.peerRelay
+      ? 'Peer Relay ' + String(peer.peerRelay).split(':vni:')[0]
+      : 'DERP 中继 ' + (peer.relay ? String(peer.relay).toUpperCase() : '');
+  return peer.name + ' · ' + route + (status.version ? ' · Tailscale ' + status.version : '');
+}
+
+function appendLatencyHint(parts) {
+  dom.latencyHint.hidden = false;
+  dom.latencyHint.textContent = '';
+  dom.latencyHint.append(...parts);
+}
+
+function lanLink(client) {
+  if (!client || !client.lanUrl) return null;
+  const link = document.createElement('a');
+  link.href = client.lanUrl;
+  link.textContent = '改用局域网地址';
+  return link;
+}
+
+/* 只看 IP 分不出直连和中继；服务端读过 tailscale status 后，这里给出
+   真正有用的下一步：直连就切局域网，中继就修 UDP / 配 Peer Relay。 */
 function renderLatencyHint(info) {
   const client = info.ok ? info.client : null;
-  if (!client || client.path !== 'tailscale' || !client.lanUrl) {
+  if (!client || client.path !== 'tailscale') {
     dom.latencyHint.hidden = true;
     dom.latencyHint.textContent = '';
     return;
   }
-  const link = document.createElement('a');
-  link.href = client.lanUrl;
-  link.textContent = '改用局域网地址';
-  dom.latencyHint.hidden = false;
-  dom.latencyHint.textContent = '';
-  dom.latencyHint.append(
-    document.createTextNode('手机正走 Tailscale 中继（不是直连），延时就是这么来的。如果手机和电脑在同一个 Wi-Fi 下，'),
-    link,
-    document.createTextNode(' 能降到几毫秒。')
-  );
+  const status = client.tailscale;
+  const peer = status && status.available ? status.peer : null;
+  const link = lanLink(client);
+  if (peer && peer.peerRelay) {
+    appendLatencyHint([
+      '已通过公网服务器做 Tailscale Peer Relay（' +
+        String(peer.peerRelay).split(':vni:')[0] +
+        '），通常比 DERP 中继快很多。',
+      ...(link ? [' 同一 Wi-Fi 下还可以 ', link, '，延迟会更低。'] : []),
+    ]);
+    return;
+  }
+  if (peer && peer.direct) {
+    if (!link) {
+      dom.latencyHint.hidden = true;
+      dom.latencyHint.textContent = '';
+      return;
+    }
+    appendLatencyHint([
+      'Tailscale 已直连（' + (peer.endpoint || 'P2P') + '），这段延时是真实链路。如果手机和电脑在同一个 Wi-Fi 下，',
+      link,
+      ' 通常还能再降到几毫秒。',
+    ]);
+    return;
+  }
+  if (peer) {
+    appendLatencyHint([
+      '打洞失败：正在走 Tailscale DERP 中继' +
+        (peer.relay ? '（' + String(peer.relay).toUpperCase() + '）' : '') +
+        '，延时就是这么来的。先检查两端 UDP 41641 和路由器 UPnP/NAT-PMP；硬 NAT 打不通时，' +
+        '升级 Tailscale ≥ 1.86 并用国内低延迟 VPS 配 Peer Relay。',
+      ...(link ? [' 同一 Wi-Fi 下可 ', link, '。'] : []),
+    ]);
+    return;
+  }
+  appendLatencyHint([
+    '手机正走 Tailscale，但读不到直连状态' +
+      (status && status.error ? '（' + status.error + '）' : '') +
+      '。在电脑上运行 tailscale ping <对端 IP>，看是 via <ip>:port 还是 via DERP(…) 就能确认。',
+    ...(link ? [' 同一 Wi-Fi 下可 ', link, '。'] : []),
+  ]);
 }
 
 function renderLatencyButton(button, dot, icon, text, info) {
@@ -927,8 +1015,8 @@ function renderLatency() {
   dom.latencyLan.textContent = info.ok ? Math.round(info.lanMs) + ' ms' : '⚠ 连不上';
   dom.latencyDaemon.textContent = info.daemonOk ? formatMs(info.daemonMs) : '⚠ 未连接';
   dom.latencyDaemon.title = info.daemonError || '';
-  dom.latencyPath.textContent = info.ok ? PATH_LABELS[info.client?.path] || '—' : '—';
-  dom.latencyPath.title = info.ok && info.client?.ip ? info.client.ip : '';
+  dom.latencyPath.textContent = info.ok ? latencyPathLabel(info.client) : '—';
+  dom.latencyPath.title = info.ok ? latencyPathTitle(info.client) : '';
   dom.latencyStream.textContent = state.connected ? '已连接' : '⚠ 中断，重连中';
   dom.latencyAt.textContent = info.at ? new Date(info.at).toLocaleTimeString() : '—';
   dom.latencyVersion.textContent = info.version ? 'v' + info.version : '—';
@@ -1279,6 +1367,7 @@ function threadCard(thread, options) {
   item.innerHTML =
     '<div class="row">' +
     (isPinned(thread.id) ? '<span class="pin">★</span>' : '') +
+    (isUnread(thread.id) ? '<span class="unread-dot" title="有新回复" aria-label="有新回复"></span>' : '') +
     (thread.ephemeral ? '<span class="badge ephemeral">临时</span>' : '') +
     '<span class="name">' +
     escapeHtml(title.slice(0, 80)) +
@@ -2188,6 +2277,43 @@ function isPinned(threadId) {
   return state.pinned.includes(threadId);
 }
 
+/* ---------- 未读标记 ---------- */
+
+function loadUnread() {
+  try {
+    const raw = localStorage.getItem('codex.unread');
+    const list = raw ? JSON.parse(raw) : [];
+    state.unread = Array.isArray(list) ? list.filter((id) => typeof id === 'string') : [];
+  } catch (error) {
+    state.unread = [];
+  }
+}
+
+function saveUnread() {
+  try {
+    localStorage.setItem('codex.unread', JSON.stringify(state.unread));
+  } catch (error) {
+    /* ignore */
+  }
+}
+
+function isUnread(threadId) {
+  return state.unread.includes(threadId);
+}
+
+/* 只改状态、不重画：调用点紧接着都会 renderListQuiet() */
+function markUnread(threadId) {
+  if (!threadId || isUnread(threadId)) return;
+  state.unread = state.unread.concat(threadId).slice(-200);
+  saveUnread();
+}
+
+function clearUnread(threadId) {
+  if (!threadId || !isUnread(threadId)) return;
+  state.unread = state.unread.filter((id) => id !== threadId);
+  saveUnread();
+}
+
 function togglePin() {
   const threadId = state.currentThreadId;
   if (!threadId) {
@@ -2439,6 +2565,7 @@ async function openThread(threadId, options) {
     dom.composer.hidden = false;
     dom.threadMeta.textContent = '';
     dom.turns.innerHTML = '<p style="color:var(--text-faint)">载入中…</p>';
+    clearUnread(threadId);
     renderList();
     if (isNarrow()) closeSidebar();
   } else if (state.currentThreadId !== threadId) {
@@ -3065,6 +3192,11 @@ document.addEventListener('visibilitychange', () => {
   }
   refreshIfVisible();
   measureLatency();
+  /* 在后台时跑完的那一轮会留未读点；现在回到前台并且正看着它，就算读过了 */
+  if (state.currentThreadId) {
+    clearUnread(state.currentThreadId);
+    renderList();
+  }
 });
 
 /* Safari 会自己记住并恢复滚动位置，刷新时就可能停在半截。
@@ -3089,6 +3221,7 @@ function updateComposerHint() {
 
 loadTheme();
 loadPinned();
+loadUnread();
 loadShelved();
 loadPending();
 loadCollapsedGroups();

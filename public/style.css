@@ -1399,6 +1399,19 @@ details.reasoning > summary {
   flex: none;
 }
 
+/* 跑完一轮、但还没点开看过的会话：名字前面一个小实心点（比「运行中」胶囊更低调） */
+.thread-card .unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+
+.thread-card.current .unread-dot {
+  background: var(--link);
+}
+
 /* ---------- Sidebar: new-chat entries and project groups ---------- */
 #sidebar-actions {
   display: flex;

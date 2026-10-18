@@ -11,6 +11,7 @@ const { spawn } = require('node:child_process');
 const { AppServerConnection } = require('./appserver');
 const { resolveCodexBinary, isBusyThreadError, isFreshThreadError, queueMessage } = require('./codex-cli');
 const { RolloutWatcher } = require('./rollout');
+const { tailscaleClientInfo, warmTailscaleStatus } = require('./tailscale');
 const {
   normalizeMode,
   profileList,
@@ -45,7 +46,7 @@ const DEFAULT_PERMISSION_FILE = path.join(os.homedir(), '.codex-remote', 'permis
 /* turn/steer 的 expectedTurnId 对不上（这一轮刚好跑完、或者已经换轮了）时的报错都长这样；
    这些情况下引导没意义，退回正常发送即可。 */
 const STEER_MISS_PATTERN = /expectedturnid|expected turn|no active turn|not active|turn not found|already (?:finished|completed)/i;
-const BRIDGE_VERSION = '1.7.15';
+const BRIDGE_VERSION = '1.8.1';
 /* 临时会话的对话内容不落盘、也不支持 thread/read(includeTurns)，
    所以桥接层自己按序缓存它的事件，重开页面时前端再回放一遍。 */
 const EPHEMERAL_EVENT_LIMIT = 4000;
@@ -967,6 +968,11 @@ class Bridge {
               ? `http://${lanAddress}:${this.options.port}/?token=${this.token}`
               : null,
         };
+        /* 只看 IP 段分不出「Tailscale 直连」和「DERP 中继」；走 Tailscale 时
+           顺便读一下 Peer 的真实状态，界面才能说清楚该不该继续折腾。 */
+        if (path === 'tailscale') {
+          payload.client.tailscale = tailscaleClientInfo(remoteAddress);
+        }
         sendJson(response, 200, payload);
         return;
       }
@@ -1456,6 +1462,8 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   const bridge = new Bridge(options);
   await bridge.start();
+  /* 预热一下，手机第一次打开延时面板时不用等 CLI 启动。 */
+  warmTailscaleStatus();
 
   /* 局域网地址排前面：手机该用这个，走 Tailscale 中继会慢一个数量级。 */
   const lan = preferredLanAddress(localAddresses());
