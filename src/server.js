@@ -46,7 +46,7 @@ const DEFAULT_PERMISSION_FILE = path.join(os.homedir(), '.codex-remote', 'permis
 /* turn/steer 的 expectedTurnId 对不上（这一轮刚好跑完、或者已经换轮了）时的报错都长这样；
    这些情况下引导没意义，退回正常发送即可。 */
 const STEER_MISS_PATTERN = /expectedturnid|expected turn|no active turn|not active|turn not found|already (?:finished|completed)/i;
-const BRIDGE_VERSION = '1.9.0';
+const BRIDGE_VERSION = '1.9.1';
 /* 延时探测别被 Codex 的忙闲拖住：HTTP 最多等 350ms，超了先用上一次采样；
    采样 1.5 秒内算新鲜，不必重复问 daemon。 */
 const DAEMON_PROBE_DEADLINE_MS = 350;
@@ -461,6 +461,9 @@ class Bridge {
     this.eventClients = new Set();
     this.pendingApprovals = new Map();
     this.activeTurns = new Map();
+    /* 手机上点了中断的那一轮：rollout 里可能还留着 task_started 没写 task_complete，
+       这里记一笔，别让它把「已中断」又翻回运行中。 */
+    this.stoppedTurns = new Set();
     this.daemonTurnIds = new Set();
     /* Threads this bridge caused the daemon to load. The daemon keeps an
        exclusive writer lock on every loaded thread, which is what makes the
@@ -637,6 +640,38 @@ class Bridge {
       this._broadcast({ type: 'notification', method: 'turn/completed', params: { threadId, turn: syntheticTurn } });
       this._broadcast({ type: 'notification', method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } });
     }
+  }
+
+  /* 桌面端那一轮由它自己的连接持有，daemon 对 turns/list 的 status 并不可靠：
+     实测 turn 还在追加 item 时，turns/list 会报 interrupted（手机会因此以为跑完了）。
+     rollout 里的 task_started / task_complete 才是这一轮的真相，两边取并集。 */
+  _rolloutRunningTurn(threadId) {
+    if (!threadId) return null;
+    const snapshot = this.rollout.states.get(threadId);
+    if (!snapshot || !snapshot.running) return null;
+    if (snapshot.turnId) {
+      if (this.stoppedTurns.has(threadId + ':' + snapshot.turnId)) return null;
+    }
+    return snapshot.turnId || null;
+  }
+
+  _markTurnStopped(threadId, turnId) {
+    if (!threadId || !turnId) return;
+    this.stoppedTurns.add(threadId + ':' + turnId);
+    if (this.stoppedTurns.size > 200) {
+      const oldest = this.stoppedTurns.values().next();
+      if (!oldest.done) this.stoppedTurns.delete(oldest.value);
+    }
+  }
+
+  /* 把「rollout 说还在跑」这件事翻译成 turn 状态，前端只认 status === 'inProgress'。 */
+  _applyRunningTurn(threadId, turn) {
+    if (!turn || typeof turn !== 'object' || turn.status === 'inProgress') return turn;
+    const rolloutTurnId = this._rolloutRunningTurn(threadId);
+    if (!rolloutTurnId) return turn;
+    if (turn.id && turn.id !== rolloutTurnId) return turn;
+    if (turn.id) this.activeTurns.set(threadId, turn.id);
+    return Object.assign({}, turn, { status: 'inProgress' });
   }
 
   _handleNotification(message) {
@@ -936,6 +971,12 @@ class Bridge {
        "list_turns is not supported yet"），不能当成「没在跑」——否则会把正在跑的
        会话误判成空闲，引导会退化成再开一轮，两个 turn 并行。 */
     if (!threadId || !Array.isArray(turns) || turns.length === 0) return;
+    /* 桌面端在跑的那一轮，daemon 可能报 interrupted；rollout 说在跑就别清缓存 */
+    const rolloutTurnId = this._rolloutRunningTurn(threadId);
+    if (rolloutTurnId) {
+      this.activeTurns.set(threadId, rolloutTurnId);
+      return;
+    }
     const running = [...turns].reverse().find((turn) => turn && turn.status === 'inProgress');
     if (running && running.id) this.activeTurns.set(threadId, running.id);
     else if (!running) this.activeTurns.delete(threadId);
@@ -975,8 +1016,12 @@ class Bridge {
       });
       const latest = Array.isArray(result?.data) ? result.data[0] : null;
       if (latest && latest.id) {
-        if (latest.status === 'inProgress') this.activeTurns.set(threadId, latest.id);
-        else if (this.activeTurns.get(threadId) === latest.id) this.activeTurns.delete(threadId);
+        const rolloutTurnId = this._rolloutRunningTurn(threadId);
+        if (latest.status === 'inProgress' || rolloutTurnId === latest.id) {
+          this.activeTurns.set(threadId, latest.id);
+        } else if (this.activeTurns.get(threadId) === latest.id) {
+          this.activeTurns.delete(threadId);
+        }
       }
       return latest || null;
     } catch (error) {
@@ -1227,6 +1272,12 @@ class Bridge {
         if (cursor) params.cursor = cursor;
         const result = await connection.request('thread/list', params);
         const data = this._mergeEphemeralThreads(Array.isArray(result.data) ? result.data : []);
+        /* 侧边栏的「运行中」也认 rollout：桌面端在跑时 daemon 的 status 可能还是 idle */
+        for (const thread of data) {
+          if (thread && this._rolloutRunningTurn(thread.id)) {
+            thread.status = Object.assign({}, thread.status, { type: 'active' });
+          }
+        }
         sendJson(response, 200, Object.assign({}, result, { data }));
         return;
       }
@@ -1296,13 +1347,18 @@ class Bridge {
         } catch (error) {
           liveError = error.message;
         }
-        const running = Boolean(turn && turn.status === 'inProgress');
-        if (running && turn.id) this.activeTurns.set(threadId, turn.id);
+        /* 只信 daemon 的 status 会把桌面端还在跑的轮次报成已完成；rollout 说在跑时
+           以 rollout 为准，并把 status 改写成 inProgress 给前端用。 */
+        turn = this._applyRunningTurn(threadId, turn);
+        const rolloutTurnId = this._rolloutRunningTurn(threadId);
+        const running = Boolean(turn && turn.status === 'inProgress') || Boolean(rolloutTurnId);
+        const activeTurnId = (turn && turn.id) || rolloutTurnId;
+        if (running && activeTurnId) this.activeTurns.set(threadId, activeTurnId);
         else if (turn) this.activeTurns.delete(threadId);
         sendJson(response, 200, {
           turn,
           running,
-          turnId: running ? turn.id : null,
+          turnId: running ? activeTurnId : null,
           attached: this.loadedThreads.has(threadId),
           error: liveError,
         });
@@ -1321,10 +1377,26 @@ class Bridge {
             omittedItems: trimmed.omitted,
           }),
         });
+        /* daemon 有时把还在跑的 turn 报成 interrupted，用 rollout 补一次状态，
+           否则刷新页面后会把「运行中」当成已经跑完，连计时和中断按钮都不见了。 */
+        const rolloutTurnId = this._rolloutRunningTurn(threadId);
+        if (rolloutTurnId && Array.isArray(trimmedResult.thread.turns)) {
+          trimmedResult.thread.turns = trimmedResult.thread.turns.map((turn) => {
+            if (!turn || turn.id !== rolloutTurnId || turn.status === 'inProgress') return turn;
+            return Object.assign({}, turn, { status: 'inProgress' });
+          });
+          if (!this.activeTurns.has(threadId)) this.activeTurns.set(threadId, rolloutTurnId);
+        }
+        if (this.activeTurns.get(threadId) && trimmedResult.thread) {
+          trimmedResult.thread.status = Object.assign({}, trimmedResult.thread.status, {
+            type: 'active',
+          });
+        }
         const payload = Object.assign({}, trimmedResult, {
           permission: this._permissionView(threadId),
           attached: this.loadedThreads.has(threadId),
           activeTurnId: this.activeTurns.get(threadId) || null,
+          running: Boolean(this.activeTurns.get(threadId)),
         });
         if (ephemeralEntry) {
           /* daemon 读不回临时会话的内容，把桥接缓存的事件一并交给前端回放 */
@@ -1374,6 +1446,7 @@ class Bridge {
         try {
           const result = await connection.request('turn/interrupt', { threadId, turnId });
           this.activeTurns.delete(threadId);
+          this._markTurnStopped(threadId, turnId);
           sendJson(response, 200, result);
         } catch (error) {
           const message = error && error.message ? error.message : '';
@@ -1390,6 +1463,7 @@ class Bridge {
           try {
             const result = await connection.request('turn/interrupt', { threadId, turnId });
             this.activeTurns.delete(threadId);
+            this._markTurnStopped(threadId, turnId);
             sendJson(response, 200, result);
           } catch (retryError) {
             const retryMessage = retryError && retryError.message ? retryError.message : '';
@@ -1426,6 +1500,11 @@ class Bridge {
   async _activeTurnId(threadId) {
     const cached = this.activeTurns.get(threadId);
     if (cached) return cached;
+    const rolloutTurnId = this._rolloutRunningTurn(threadId);
+    if (rolloutTurnId) {
+      this.activeTurns.set(threadId, rolloutTurnId);
+      return rolloutTurnId;
+    }
     let latest = null;
     try {
       latest = await this._latestTurn(threadId);
@@ -1483,7 +1562,9 @@ class Bridge {
     }
 
     const latest = await this._latestTurn(threadId);
-    const turnId = latest && latest.status === 'inProgress' && latest.id ? latest.id : null;
+    const turnId =
+      (latest && latest.status === 'inProgress' && latest.id ? latest.id : null) ||
+      this._rolloutRunningTurn(threadId);
     if (turnId) this.activeTurns.set(threadId, turnId);
     else this.activeTurns.delete(threadId);
     this._markThreadLoaded(threadId);
