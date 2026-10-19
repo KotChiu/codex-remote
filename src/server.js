@@ -46,7 +46,7 @@ const DEFAULT_PERMISSION_FILE = path.join(os.homedir(), '.codex-remote', 'permis
 /* turn/steer 的 expectedTurnId 对不上（这一轮刚好跑完、或者已经换轮了）时的报错都长这样；
    这些情况下引导没意义，退回正常发送即可。 */
 const STEER_MISS_PATTERN = /expectedturnid|expected turn|no active turn|not active|turn not found|already (?:finished|completed)/i;
-const BRIDGE_VERSION = '1.8.7';
+const BRIDGE_VERSION = '1.9.0';
 /* 延时探测别被 Codex 的忙闲拖住：HTTP 最多等 350ms，超了先用上一次采样；
    采样 1.5 秒内算新鲜，不必重复问 daemon。 */
 const DAEMON_PROBE_DEADLINE_MS = 350;
@@ -185,6 +185,14 @@ function limitThreadTurns(turns, limit) {
 function slimNotificationParams(params) {
   if (!params || typeof params !== 'object' || !params.item) return params;
   return Object.assign({}, params, { item: slimItemForPhone(params.item) });
+}
+
+/* 运行中轮询只带最近一轮；一条工具输出/思考也可能很长，跟整段读取用同一套剪裁，
+   免得每 2 秒都把几十 KB 推到手机上。 */
+function slimTurnForPhone(turn) {
+  if (!turn || typeof turn !== 'object') return turn;
+  if (!Array.isArray(turn.items)) return turn;
+  return Object.assign({}, turn, { items: turn.items.slice(-400).map(slimItemForPhone) });
 }
 
 function clampItemLimit(raw) {
@@ -833,6 +841,24 @@ class Bridge {
     if (snapshot && snapshot.running) return false;
     if (!this.connection || !this.connection.ready) return false;
 
+    /* 放锁前再跟 daemon 对一次最新一轮。桥接没收到桌面端那一轮的 turn 通知，
+       只看本地缓存就可能把正在跑的会话 archive 掉——之后 turn/interrupt 会报
+       "thread not found"，表现就是手机上一直中断不了。 */
+    let latest;
+    try {
+      latest = await this._latestTurn(threadId);
+    } catch (error) {
+      if (/thread not found/i.test(error.message || '')) {
+        this.loadedThreads.delete(threadId);
+        return true;
+      }
+      return false;
+    }
+    if (latest && latest.status === 'inProgress') {
+      if (latest.id) this.activeTurns.set(threadId, latest.id);
+      return false;
+    }
+
     this.loadedThreads.delete(threadId);
     try {
       await this.connection.request('thread/archive', { threadId });
@@ -933,6 +959,33 @@ class Bridge {
           turns: (bare && bare.thread && bare.thread.turns) || [],
         }),
       });
+    }
+  }
+
+  /* 只取最近一轮。桌面端点开一个会话时，它那一轮由桌面自己的连接持有；
+     桥接这边拿不到 item 的实时通知，但可以用这个轻量接口读到进行到哪了。
+     比整套 thread/read 小得多（itemsView=notLoaded 时只有 turn 元数据）。 */
+  async _latestTurn(threadId, itemsView = 'notLoaded') {
+    try {
+      const result = await this.connection.request('thread/turns/list', {
+        threadId,
+        limit: 1,
+        sortDirection: 'desc',
+        itemsView,
+      });
+      const latest = Array.isArray(result?.data) ? result.data[0] : null;
+      if (latest && latest.id) {
+        if (latest.status === 'inProgress') this.activeTurns.set(threadId, latest.id);
+        else if (this.activeTurns.get(threadId) === latest.id) this.activeTurns.delete(threadId);
+      }
+      return latest || null;
+    } catch (error) {
+      const message = error && error.message ? error.message : '';
+      if (/no rollout found/i.test(message)) return null;
+      if (!/not supported|unknown method|method not found/i.test(message)) throw error;
+      const read = await this._readThread(threadId);
+      const turns = read?.thread?.turns ?? [];
+      return turns.length ? turns[turns.length - 1] : null;
     }
   }
 
@@ -1225,6 +1278,37 @@ class Bridge {
         return;
       }
 
+      if (segments[1] === 'threads' && segments[3] === 'attach' && request.method === 'POST') {
+        const threadId = segments[2];
+        const result = await this._attachThread(threadId);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      /* 运行中的轻量回读：只取最近一轮（带 items），给手机做 2 秒一次的
+         实时刷新。整段 thread/read 可能有一两 MB，不能拿来做轮询。 */
+      if (segments[1] === 'threads' && segments[3] === 'live' && request.method === 'GET') {
+        const threadId = segments[2];
+        let turn = null;
+        let liveError = null;
+        try {
+          turn = slimTurnForPhone(await this._latestTurn(threadId, 'full'));
+        } catch (error) {
+          liveError = error.message;
+        }
+        const running = Boolean(turn && turn.status === 'inProgress');
+        if (running && turn.id) this.activeTurns.set(threadId, turn.id);
+        else if (turn) this.activeTurns.delete(threadId);
+        sendJson(response, 200, {
+          turn,
+          running,
+          turnId: running ? turn.id : null,
+          attached: this.loadedThreads.has(threadId),
+          error: liveError,
+        });
+        return;
+      }
+
       if (segments[1] === 'threads' && segments.length === 3 && request.method === 'GET') {
         const threadId = segments[2];
         const ephemeralEntry = this.ephemeralThreads.get(threadId);
@@ -1239,6 +1323,8 @@ class Bridge {
         });
         const payload = Object.assign({}, trimmedResult, {
           permission: this._permissionView(threadId),
+          attached: this.loadedThreads.has(threadId),
+          activeTurnId: this.activeTurns.get(threadId) || null,
         });
         if (ephemeralEntry) {
           /* daemon 读不回临时会话的内容，把桥接缓存的事件一并交给前端回放 */
@@ -1275,9 +1361,14 @@ class Bridge {
 
       if (segments[1] === 'threads' && segments[3] === 'interrupt' && request.method === 'POST') {
         const threadId = segments[2];
-        const turnId = await this._activeTurnId(threadId);
+        let turnId = await this._activeTurnId(threadId);
         if (!turnId) {
-          sendJson(response, 409, { error: 'no active turn for this thread' });
+          /* 桌面端刚开跑，桥接还没加入这个 thread；先 attach 再找 active turn */
+          await this._attachThread(threadId);
+          turnId = await this._activeTurnId(threadId);
+        }
+        if (!turnId) {
+          sendJson(response, 200, { ok: true, alreadyStopped: true });
           return;
         }
         try {
@@ -1286,12 +1377,27 @@ class Bridge {
           sendJson(response, 200, result);
         } catch (error) {
           const message = error && error.message ? error.message : '';
-          if (/active writer|thread not found/i.test(message)) {
-            sendJson(response, 409, {
-              error: '这个会话正在电脑上运行，执行在电脑进程里，手机暂时无法中断；请在电脑上点停止。',
-            });
-          } else {
-            throw error;
+          if (!/active writer|thread not found/i.test(message)) throw error;
+
+          /* 这个 thread 可能是被桌面端占着、或者刚被别的客户端 unload 了。
+             重新加入一次再中断；attach 本身不会 archive 正在跑的会话。 */
+          await this._attachThread(threadId);
+          turnId = await this._activeTurnId(threadId);
+          if (!turnId) {
+            sendJson(response, 200, { ok: true, alreadyStopped: true });
+            return;
+          }
+          try {
+            const result = await connection.request('turn/interrupt', { threadId, turnId });
+            this.activeTurns.delete(threadId);
+            sendJson(response, 200, result);
+          } catch (retryError) {
+            const retryMessage = retryError && retryError.message ? retryError.message : '';
+            const wrapped = new Error(
+              '手机接管后仍无法中断这一轮：' + retryMessage + '。请在电脑上点停止后再试。'
+            );
+            wrapped.statusCode = 409;
+            throw wrapped;
           }
         }
         return;
@@ -1320,11 +1426,68 @@ class Bridge {
   async _activeTurnId(threadId) {
     const cached = this.activeTurns.get(threadId);
     if (cached) return cached;
-    const read = await this._readThread(threadId);
-    const turns = read?.thread?.turns ?? [];
-    const active = [...turns].reverse().find((turn) => turn.status === 'inProgress');
-    if (active?.id) this.activeTurns.set(threadId, active.id);
-    return active?.id ?? null;
+    let latest = null;
+    try {
+      latest = await this._latestTurn(threadId);
+    } catch (error) {
+      if (!isFreshThreadError(error)) throw error;
+    }
+    if (latest && latest.status === 'inProgress' && latest.id) {
+      this.activeTurns.set(threadId, latest.id);
+      return latest.id;
+    }
+    this.activeTurns.delete(threadId);
+    return null;
+  }
+
+  /* 接管：把自己加入桌面端正在用的那一个 thread。
+     实测 app-server 允许第二个连接 resume 一个正在跑的 thread，之后
+     turn/steer 和 turn/interrupt 都能直接生效——不需要把桌面端踢下线，
+     也不依赖它的窗口有没有失焦。只有会话空闲但被别的应用占着写锁时，
+     才用 archive+unarchive 把锁放掉；正在跑时绝不 archive，否则这一轮
+     会从 daemon 的索引里消失，后续中断就会变成 thread not found。 */
+  async _attachThread(threadId) {
+    const connection = this._requireConnection();
+    if (this.ephemeralThreads.has(threadId)) {
+      const turnId = this.activeTurns.get(threadId) || null;
+      return { attached: true, running: Boolean(turnId), turnId, ephemeral: true };
+    }
+
+    let resumeError = await this._resumeThread(threadId, {});
+    if (resumeError && /active writer/i.test(resumeError.message || '')) {
+      let latest = null;
+      try {
+        latest = await this._latestTurn(threadId);
+      } catch (error) {
+        if (!isFreshThreadError(error)) throw error;
+      }
+      if (latest && latest.status === 'inProgress') {
+        const error = new Error('这个会话正在电脑上运行，暂时无法加入；请在电脑上停止这一轮后再试。');
+        error.statusCode = 409;
+        throw error;
+      }
+      try {
+        await connection.request('thread/archive', { threadId });
+        await connection.request('thread/unarchive', { threadId });
+      } catch (error) {
+        const wrapped = new Error('释放写锁失败：' + error.message);
+        wrapped.statusCode = 409;
+        throw wrapped;
+      }
+      resumeError = await this._resumeThread(threadId, {});
+    }
+    if (resumeError && !isFreshThreadError(resumeError)) {
+      const error = new Error('接管失败：' + resumeError.message);
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const latest = await this._latestTurn(threadId);
+    const turnId = latest && latest.status === 'inProgress' && latest.id ? latest.id : null;
+    if (turnId) this.activeTurns.set(threadId, turnId);
+    else this.activeTurns.delete(threadId);
+    this._markThreadLoaded(threadId);
+    return { attached: true, running: Boolean(turnId), turnId };
   }
 
   async _deliverMessage(threadId, text, imagePaths, options) {
@@ -1339,7 +1502,16 @@ class Bridge {
        前提是本地知道当前轮的 id（turn/steer 要 expectedTurnId 对得上）；这一轮刚好
        跑完、或者 daemon 不认这个方法，就退回下面正常的发送流程。 */
     if (options && options.steer) {
-      const activeTurnId = await this._activeTurnId(threadId);
+      let activeTurnId = await this._activeTurnId(threadId);
+      if (!activeTurnId) {
+        /* 桌面端占着这个 thread 时，桥接可能还没加入；先 attach 再引导 */
+        try {
+          await this._attachThread(threadId);
+          activeTurnId = await this._activeTurnId(threadId);
+        } catch (error) {
+          /* attach 失败就按原来的发送流程走，下面的 resume 会给出准确错误 */
+        }
+      }
       if (activeTurnId) {
         try {
           const result = await connection.request('turn/steer', {
@@ -1355,6 +1527,28 @@ class Bridge {
           };
         } catch (error) {
           if (!isBusyThreadError(error) && !STEER_MISS_PATTERN.test(error.message || '')) throw error;
+          /* 这一轮可能刚被桌面端重新加载过，加入一次再试 */
+          try {
+            await this._attachThread(threadId);
+            const retryTurnId = await this._activeTurnId(threadId);
+            if (retryTurnId) {
+              const result = await connection.request('turn/steer', {
+                threadId,
+                expectedTurnId: retryTurnId,
+                input,
+              });
+              return {
+                mode: 'steered',
+                turnId: retryTurnId,
+                turn: result?.turn ?? null,
+                images: images.length,
+              };
+            }
+          } catch (retryError) {
+            if (!isBusyThreadError(retryError) && !STEER_MISS_PATTERN.test(retryError.message || '')) {
+              throw retryError;
+            }
+          }
           this.activeTurns.delete(threadId);
         }
       }

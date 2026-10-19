@@ -16,6 +16,11 @@ const state = {
   turns: [],
   pendingApprovals: new Map(),
   activeTurns: {},
+  /* 桥接是否已经加入这个会话（能直接 steer/interrupt 桌面端正在跑的那一轮） */
+  attached: {},
+  liveTimer: null,
+  liveTimerThread: null,
+  liveInFlight: false,
   pendingEchoes: [],
   attachments: [],
   drafts: new Map(),
@@ -1885,10 +1890,16 @@ function syncRunStarted() {
 
 /* 对话流底部的运行中指示，跟桌面版一样长在会话里，不是长在输入框旁边。 */
 function runIndicatorMarkup(elapsedText) {
+  const id = state.currentThreadId;
+  const attached = Boolean(id && state.attached[id]);
+  const action = attached
+    ? '<span class="turn-owned">已接管</span>'
+    : '<button type="button" class="turn-takeover" data-takeover title="加入电脑上正在运行的这一轮，手机可直接中断或引导">接管</button>';
   return (
     '<div class="turn-running"><span class="turn-running-dot"></span>' +
     '<span>运行中</span>' +
-    '<span class="turn-elapsed">' + escapeHtml(elapsedText) + '</span></div>'
+    '<span class="turn-elapsed">' + escapeHtml(elapsedText) + '</span>' +
+    action + '</div>'
   );
 }
 
@@ -2059,7 +2070,20 @@ function renderThread() {
 
   if (started) parts.push(runIndicatorMarkup(formatElapsed(Date.now() / 1000 - started.at)));
 
+  /* 运行中每 2 秒会重画一次：保留用户展开的思考/工具详情，别一刷新就折叠回去 */
+  const openDetails = new Set(
+    [...dom.turns.querySelectorAll('details[open][data-item-id]')].map((el) =>
+      el.getAttribute('data-item-id')
+    )
+  );
+  const keepScrollTop = dom.turns.scrollTop;
   dom.turns.innerHTML = parts.join('');
+  for (const id of openDetails) {
+    const selector = 'details[data-item-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]';
+    const el = dom.turns.querySelector(selector);
+    if (el) el.open = true;
+  }
+  if (!state.pinnedToBottom) dom.turns.scrollTop = keepScrollTop;
   observeTurnSizes();
 }
 
@@ -2605,6 +2629,7 @@ async function openThread(threadId, options) {
     if (switching) restoreDraft(threadId);
     state.currentThreadId = threadId;
     if (switching) {
+      stopLivePolling();
       state.turns = [];
       state.pendingEchoes = [];
       state.turnDiffs = new Map();
@@ -2630,6 +2655,7 @@ async function openThread(threadId, options) {
     state.thread = result.thread;
     state.omittedItems = Number(state.thread && state.thread.omittedItems) || 0;
     state.permission = result.permission || { mode: 'default', effective: null };
+    state.attached[threadId] = Boolean(result.attached) || Boolean(state.thread && state.thread.ephemeral);
     updateThreadActions();
     /* 正在跑的那一轮，服务端读回来的内容可能是不全的（实测工具调用那条会消失十几秒，
        要等命令跑完才落盘）。整块替换会让界面上已经有的记录凭空少掉，连带把本地的乐观
@@ -2671,6 +2697,9 @@ async function openThread(threadId, options) {
     saveLastThread(threadId);
     /* 这一轮要是已经跑完了，挂在输入框上面的那条该自动发出去（完成通知可能没收到） */
     flushPending(threadId);
+    /* 桌面端在跑：定时读最近一轮，手机也能看到输出和状态 */
+    if (!state.thread.ephemeral && threadRunning(threadId)) startLivePolling(threadId);
+    else stopLivePolling();
     if (silent) {
       if (state.pinnedToBottom) scrollTurnsToBottom();
     } else {
@@ -2816,8 +2845,10 @@ async function deliverMessage(threadId, text, attachments, options) {
       'queued-' + Date.now();
     if (result && (result.mode === 'started' || result.mode === 'steered')) {
       state.activeTurns[threadId] = turnId;
+      state.attached[threadId] = true;
       syncThreadRunningFlag(threadId, true);
       renderListQuiet();
+      startLivePolling(threadId);
     }
     if (echo) {
       echo.turnId = turnId;
@@ -3018,6 +3049,7 @@ async function interrupt() {
     });
     /* 中断成功这一轮马上就结束了；本地先撤掉「运行中」，挂着的待发消息不用干等通知 */
     delete state.activeTurns[threadId];
+    stopLivePolling();
     syncThreadRunningFlag(threadId, false);
     renderList();
     renderThread();
@@ -3028,6 +3060,100 @@ async function interrupt() {
     toast('中断失败：' + error.message);
   } finally {
     dom.stopButton.disabled = false;
+  }
+}
+
+/* ---------- 接管 / 运行中实时回读 ---------- */
+
+function stopLivePolling() {
+  if (state.liveTimer) clearInterval(state.liveTimer);
+  state.liveTimer = null;
+  state.liveTimerThread = null;
+}
+
+/* 桌面端跑的时候，daemon 只把 item 事件推给它自己的连接；桥接这边收不到。
+   所以只要会话在跑，就每 2 秒读一次「最近一轮」，把新的 item 合并进来。
+   这是只读接口，不会抢桌面端的焦点，也不会打断它。 */
+function startLivePolling(threadId) {
+  if (!threadId) return;
+  if (state.liveTimer && state.liveTimerThread === threadId) return;
+  stopLivePolling();
+  state.liveTimerThread = threadId;
+  state.liveTimer = setInterval(() => pollLiveThread(threadId), 2000);
+  pollLiveThread(threadId);
+}
+
+async function pollLiveThread(threadId) {
+  if (state.liveInFlight || document.hidden || state.currentThreadId !== threadId) return;
+  state.liveInFlight = true;
+  try {
+    const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/live');
+    if (state.currentThreadId !== threadId) return;
+    if (typeof result.attached === 'boolean') state.attached[threadId] = result.attached;
+    const turn = result.turn;
+    if (!turn) {
+      if (!result.running) stopLivePolling();
+      return;
+    }
+    const index = state.turns.findIndex((candidate) => candidate.id === turn.id);
+    if (index >= 0) {
+      const previous = state.turns[index];
+      const incoming = Array.isArray(turn.items) ? turn.items : [];
+      const known = new Set(incoming.map((item) => item && item.id));
+      const extra = (previous.items || []).filter((item) => item && item.id && !known.has(item.id));
+      state.turns[index] = Object.assign({}, turn, {
+        items: extra.length ? incoming.concat(extra) : incoming,
+      });
+    } else {
+      state.turns.push(Object.assign({}, turn, { items: turn.items || [] }));
+    }
+
+    if (turn.status === 'inProgress') {
+      state.activeTurns[threadId] = turn.id;
+      syncThreadRunningFlag(threadId, true);
+      finalizeEchoes();
+      renderListQuiet();
+      renderThread();
+      if (state.pinnedToBottom) scrollTurnsToBottom();
+    } else {
+      delete state.activeTurns[threadId];
+      syncThreadRunningFlag(threadId, false);
+      stopLivePolling();
+      finalizeEchoes();
+      renderListQuiet();
+      renderThread();
+      flushPending(threadId);
+    }
+  } catch (error) {
+    /* 轮询失败不打扰用户；下一轮还会再试 */
+  } finally {
+    state.liveInFlight = false;
+  }
+}
+
+async function takeOverThread() {
+  const threadId = state.currentThreadId;
+  if (!threadId) return;
+  const button = dom.turns.querySelector('[data-takeover]');
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/attach', {
+      method: 'POST',
+    });
+    state.attached[threadId] = true;
+    if (result.running && result.turnId) {
+      state.activeTurns[threadId] = result.turnId;
+      syncThreadRunningFlag(threadId, true);
+      startLivePolling(threadId);
+      toast('已接管，可以中断，或点「引导」把消息插进这一轮');
+    } else {
+      toast('已接管这个会话');
+    }
+    renderListQuiet();
+    renderThread();
+  } catch (error) {
+    toast('接管失败：' + error.message);
+    if (button) button.disabled = false;
   }
 }
 
@@ -3078,6 +3204,15 @@ function bindEvents() {
     });
   }
   dom.ephemeralClose.addEventListener('click', closeEphemeralThread);
+  /* 运行中的「接管」：加入桌面端正在跑的那一轮，之后中断/引导都直接生效 */
+  dom.turns.addEventListener('click', (event) => {
+    const target = event.target;
+    const button = target && target.closest ? target.closest('[data-takeover]') : null;
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    takeOverThread();
+  });
   /* 一键复制：代码块 / 命令输出整段，链接后面的图标复制真实地址 */
   dom.turns.addEventListener('click', (event) => {
     const target = event.target;

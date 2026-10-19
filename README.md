@@ -116,6 +116,10 @@ What you can do:
   running turn you see `● Running 1:23` (pulsing dot + ticking clock). The baseline is the server's `turn.startedAt`
   (falling back to the moment the bridge first saw the turn start); formats are `0:12` / `1:23` / `1:02:03`.
   It ticks once a second, updates only that text node, and stops while the page is in the background.
+- **Take over a turn running on the desktop**: while a desktop-owned turn is running, a **Take over** button appears
+  next to the timer. It joins the same thread — no need to close the desktop session or move focus — and Interrupt /
+  Steer then act on that running turn. The phone re-reads the latest turn every 2 seconds so new output and tool calls
+  show up; once the turn is done, the bridge hands the writer lock back to the desktop instead of holding it.
 - **Sending during a running turn attaches the message instead of interrupting** (matches the desktop app): pressing
   Send while a turn is running does not interrupt it — the message floats above the composer (`Pending` + text +
   `Steer` / `✕`) and is sent as a new turn when the current one finishes. Switching sessions, or even closing and

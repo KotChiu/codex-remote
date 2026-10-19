@@ -552,6 +552,32 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.turn-takeover {
+  margin-left: 4px;
+  padding: 5px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.turn-takeover:active {
+  transform: scale(0.97);
+}
+
+.turn-takeover:disabled {
+  opacity: 0.5;
+}
+
+.turn-owned {
+  margin-left: 2px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
 @keyframes run-pulse {
   0%,
   100% {
