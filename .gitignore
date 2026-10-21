@@ -5,3 +5,10 @@ node_modules/
 uploads/
 token
 ._*
+
+# local-only marketing images / screenshots of real chats
+promo/
+# never commit credentials
+*.pem
+*.key
+.env
