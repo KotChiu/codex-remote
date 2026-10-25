@@ -147,6 +147,7 @@ button {
 }
 
 #sidebar-refresh,
+#sidebar-collapse,
 #sidebar-close,
 #theme-button {
   width: 32px;
@@ -158,6 +159,7 @@ button {
 }
 
 #sidebar-refresh:active,
+#sidebar-collapse:active,
 #sidebar-close:active,
 #theme-button:active {
   background: var(--bg-hover);
@@ -171,7 +173,8 @@ button {
   line-height: 1;
 }
 
-#sidebar-close {
+#sidebar-close,
+#sidebar-collapse {
   display: none;
 }
 
@@ -490,6 +493,7 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 #thread-meta {
@@ -514,6 +518,35 @@ button {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding: 16px 16px 28px;
+}
+
+/* 往上翻历史时浮在右下角，点一下回到最新一条 */
+#jump-bottom {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 6;
+  width: 38px;
+  height: 38px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  box-shadow: 0 4px 14px var(--shadow-color);
+  font-size: 17px;
+  line-height: 1;
+}
+
+#jump-bottom.show {
+  display: flex;
+}
+
+#jump-bottom:active {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 #placeholder {
@@ -1284,12 +1317,41 @@ details.reasoning > summary {
     display: block;
   }
 
+  #sidebar-collapse {
+    display: none;
+  }
+
   #sidebar-toggle {
     display: block;
   }
 }
 
 @media (min-width: 768px) {
+  /* 桌面端：侧边栏可以整体收起，把宽度让给对话 */
+  #sidebar {
+    transition: width 0.22s ease, opacity 0.18s ease;
+    overflow: hidden;
+  }
+
+  body.sidebar-collapsed #sidebar {
+    width: 0;
+    opacity: 0;
+    border-right-color: transparent;
+  }
+
+  #sidebar-collapse {
+    display: block;
+  }
+
+  #sidebar-toggle {
+    display: block;
+  }
+
+  #jump-bottom {
+    right: 26px;
+    bottom: 18px;
+  }
+
   #turns {
     padding: 20px 24px 32px;
   }

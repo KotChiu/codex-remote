@@ -21,6 +21,13 @@ const state = {
   liveTimer: null,
   liveTimerThread: null,
   liveInFlight: false,
+  /* 连续几次读到「已结束」才真的收起运行状态：网络抖动或 daemon 刚起跑时
+     偶发一次 interrupted 不该让计时和中断按钮闪没 */
+  liveStops: {},
+  probing: false,
+  lastTurnIds: {},
+  /* 运行中每 2 秒回读一次；内容没变就别整段重画（长对话里重画一次很贵） */
+  liveSigs: {},
   pendingEchoes: [],
   attachments: [],
   drafts: new Map(),
@@ -42,8 +49,10 @@ const state = {
   threadModes: {},
   permission: null,
   theme: 'auto',
-  /* 一次跟电脑要多少条记录（桥接默认给最近 500 条）。更早的点「显示更早的」再加。 */
-  itemLimit: 500,
+  /* 首屏先要最近的 300 条，滚到顶部再自动续载，长会话打开更快。 */
+  itemLimit: 300,
+  turnLimit: 20,
+  hasMore: false,
   omittedItems: 0,
   runStarted: null,
   projects: [],
@@ -55,6 +64,7 @@ const dom = {
   sidebar: document.getElementById('sidebar'),
   sidebarBrand: document.getElementById('sidebar-brand'),
   sidebarToggle: document.getElementById('sidebar-toggle'),
+  sidebarCollapse: document.getElementById('sidebar-collapse'),
   sidebarClose: document.getElementById('sidebar-close'),
   sidebarRefresh: document.getElementById('sidebar-refresh'),
   scrim: document.getElementById('scrim'),
@@ -92,6 +102,7 @@ const dom = {
   threadList: document.getElementById('thread-list'),
   listEmpty: document.getElementById('list-empty'),
   sidebarNewChat: document.getElementById('sidebar-new-chat'),
+  jumpBottom: document.getElementById('jump-bottom'),
   sidebarNewEphemeral: document.getElementById('sidebar-new-ephemeral'),
   projectAdd: document.getElementById('project-add'),
   newProjectModal: document.getElementById('new-project-modal'),
@@ -517,13 +528,60 @@ function closeSidebar() {
   dom.scrim.hidden = true;
 }
 
+const SIDEBAR_COLLAPSED_KEY = 'codex.sidebarCollapsed';
+
+function sidebarCollapsed() {
+  return document.body.classList.contains('sidebar-collapsed');
+}
+
+function applySidebarCollapsed() {
+  if (dom.sidebarToggle) {
+    dom.sidebarToggle.setAttribute('aria-expanded', sidebarCollapsed() ? 'false' : 'true');
+  }
+  /* 收起/展开会改变可视宽度，钉在底部时把最新一条重新对齐 */
+  if (state.pinnedToBottom) requestAnimationFrame(scrollTurnsToBottom);
+  requestAnimationFrame(updateJumpButton);
+}
+
+function setSidebarCollapsed(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+  } catch (error) {
+    /* ignore */
+  }
+  applySidebarCollapsed();
+}
+
+function restoreSidebarCollapsed() {
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch (error) {
+    /* ignore */
+  }
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  applySidebarCollapsed();
+}
+
 function toggleSidebar() {
-  if (document.body.classList.contains('sidebar-open')) closeSidebar();
-  else openSidebar();
+  if (isNarrow()) {
+    if (document.body.classList.contains('sidebar-open')) closeSidebar();
+    else openSidebar();
+    return;
+  }
+  setSidebarCollapsed(!sidebarCollapsed());
 }
 
 function isNearBottom() {
   return dom.turns.scrollHeight - dom.turns.scrollTop - dom.turns.clientHeight < 120;
+}
+
+/* 往上翻的时候才露出「回到底部」；内容不够滚动或已经在底部就藏起来 */
+function updateJumpButton() {
+  if (!dom.jumpBottom) return;
+  const overflow = dom.turns.scrollHeight - dom.turns.clientHeight;
+  dom.jumpBottom.classList.toggle('show', overflow > 48 && !isNearBottom());
 }
 
 function scheduleRender() {
@@ -1773,10 +1831,14 @@ function scrollTurnsToBottom() {
 function pinToBottomSoon() {
   state.pinnedToBottom = true;
   scrollTurnsToBottom();
+  updateJumpButton();
   requestAnimationFrame(scrollTurnsToBottom);
   for (const delay of [80, 250, 600, 1200]) {
     setTimeout(() => {
-      if (state.pinnedToBottom) scrollTurnsToBottom();
+      if (state.pinnedToBottom) {
+        scrollTurnsToBottom();
+        updateJumpButton();
+      }
     }, delay);
   }
 }
@@ -1972,16 +2034,23 @@ function finalizeEchoes() {
 }
 
 /* 一条记录都没裁掉的会话走不到这里；裁过的话顶部会有个按钮可以往回翻。 */
-const LOAD_EARLIER_STEP = 500;
+const LOAD_EARLIER_STEP = 300;
 
 async function loadEarlierItems() {
-  if (!state.currentThreadId) return;
-  /* 内容会插在顶部，用「距底部的距离」当锚点，滚回原来那条记录 */
-  const fromBottom = dom.turns.scrollHeight - dom.turns.scrollTop;
-  state.itemLimit = (state.itemLimit || 500) + LOAD_EARLIER_STEP;
-  state.pinnedToBottom = false;
-  await openThread(state.currentThreadId, { silent: true });
-  dom.turns.scrollTop = dom.turns.scrollHeight - fromBottom;
+  if (!state.currentThreadId || state.loadingEarlier) return;
+  if (!state.omittedItems && !state.hasMore) return;
+  state.loadingEarlier = true;
+  try {
+    /* 内容会插在顶部，用「距底部的距离」当锚点，滚回原来那条记录 */
+    const fromBottom = dom.turns.scrollHeight - dom.turns.scrollTop;
+    state.itemLimit = (state.itemLimit || 300) + LOAD_EARLIER_STEP;
+    state.turnLimit = Math.min((state.turnLimit || 20) + 20, 200);
+    state.pinnedToBottom = false;
+    await openThread(state.currentThreadId, { silent: true });
+    dom.turns.scrollTop = dom.turns.scrollHeight - fromBottom;
+  } finally {
+    state.loadingEarlier = false;
+  }
 }
 
 function renderThread() {
@@ -2014,14 +2083,16 @@ function renderThread() {
     if (!byItem.has(key)) byItem.set(key, []);
     byItem.get(key).push(echo);
   }
-  if (state.omittedItems > 0) {
-    parts.push(
-      '<div class="older-row"><button type="button" data-load-earlier="1">⇡ 显示更早的 ' +
-        LOAD_EARLIER_STEP +
-        ' 条（还有 ' +
-        state.omittedItems +
-        ' 条没显示）</button></div>'
-    );
+  if (state.omittedItems > 0 || state.hasMore) {
+    const label =
+      state.omittedItems > 0
+        ? '⇡ 显示更早的 ' +
+          LOAD_EARLIER_STEP +
+          ' 条（还有 ' +
+          state.omittedItems +
+          ' 条没显示）'
+        : '⇡ 显示更早的消息';
+    parts.push('<div class="older-row"><button type="button" data-load-earlier="1">' + label + '</button></div>');
   }
   for (const turn of state.turns) {
     const running = turn.status === 'inProgress' ? ' running' : '';
@@ -2085,6 +2156,7 @@ function renderThread() {
   }
   if (!state.pinnedToBottom) dom.turns.scrollTop = keepScrollTop;
   observeTurnSizes();
+  updateJumpButton();
 }
 
 /* 乐观回显的那条消息：先用本地内容画出来，等服务端把同一条记进会话里再撤掉。 */
@@ -2634,7 +2706,9 @@ async function openThread(threadId, options) {
       state.pendingEchoes = [];
       state.turnDiffs = new Map();
       state.planSteps = new Map();
-      state.itemLimit = 500;
+      state.itemLimit = 300;
+      state.turnLimit = 20;
+      state.hasMore = false;
       state.omittedItems = 0;
     }
     dom.composer.hidden = false;
@@ -2649,11 +2723,17 @@ async function openThread(threadId, options) {
 
   try {
     const result = await api(
-      '/api/threads/' + encodeURIComponent(threadId) + '?limit=' + (state.itemLimit || 500)
+      '/api/threads/' +
+        encodeURIComponent(threadId) +
+        '?limit=' +
+        (state.itemLimit || 300) +
+        '&turns=' +
+        (state.turnLimit || 20)
     );
     if (silent && state.currentThreadId !== threadId) return;
     state.thread = result.thread;
     state.omittedItems = Number(state.thread && state.thread.omittedItems) || 0;
+    state.hasMore = Boolean(result.hasMore);
     state.permission = result.permission || { mode: 'default', effective: null };
     state.attached[threadId] = Boolean(result.attached) || Boolean(state.thread && state.thread.ephemeral);
     updateThreadActions();
@@ -2675,6 +2755,9 @@ async function openThread(threadId, options) {
     /* 服务端读回来的 turn 状态才算准：内存里的 activeTurns 跟它对齐一次。被中断的
        那一轮 daemon 不发 turn/completed，不校准的话界面会一直显示「运行中」，挂在
        输入框上面的待发消息也永远等不到自动发。 */
+    state.lastTurnIds[threadId] = state.turns.length
+      ? state.turns[state.turns.length - 1].id
+      : null;
     const runningTurn = [...state.turns].reverse().find((turn) => turn.status === 'inProgress');
     if (state.turns.length > 0) {
       if (runningTurn) state.activeTurns[threadId] = runningTurn.id;
@@ -3108,14 +3191,37 @@ async function pollLiveThread(threadId) {
       state.turns.push(Object.assign({}, turn, { items: turn.items || [] }));
     }
 
+    const liveItems = Array.isArray(turn.items) ? turn.items : [];
+    const lastItem = liveItems[liveItems.length - 1];
+    const signature =
+      turn.id +
+      ':' +
+      liveItems.length +
+      ':' +
+      (lastItem ? lastItem.id + ':' + JSON.stringify(lastItem).length : '');
+    const changed = state.liveSigs[threadId] !== signature;
+    state.liveSigs[threadId] = signature;
+    state.lastTurnIds[threadId] = turn.id;
+
     if (turn.status === 'inProgress') {
+      delete state.liveStops[threadId];
       state.activeTurns[threadId] = turn.id;
       syncThreadRunningFlag(threadId, true);
       finalizeEchoes();
+      if (!changed) return;
       renderListQuiet();
       renderThread();
       if (state.pinnedToBottom) scrollTurnsToBottom();
     } else {
+      /* 一次「已结束」不算数：网络慢、daemon 刚落盘时都会短暂读到旧状态。
+         连续两次确认才收起计时和中断，避免状态来回闪。 */
+      const stops = (state.liveStops[threadId] || 0) + 1;
+      state.liveStops[threadId] = stops;
+      if (stops < 2) {
+        renderThread();
+        return;
+      }
+      delete state.liveStops[threadId];
       delete state.activeTurns[threadId];
       syncThreadRunningFlag(threadId, false);
       stopLivePolling();
@@ -3128,6 +3234,35 @@ async function pollLiveThread(threadId) {
     /* 轮询失败不打扰用户；下一轮还会再试 */
   } finally {
     state.liveInFlight = false;
+  }
+}
+
+/* 会话空闲时的轻量探测：只问「最近一轮是谁、在不在跑」，不搬 items。
+   有变化才整段重读，长会话不会每 6 秒全量刷一次。 */
+async function probeThreadState(threadId) {
+  if (state.probing || document.hidden || state.currentThreadId !== threadId) return;
+  state.probing = true;
+  try {
+    const result = await api(
+      '/api/threads/' + encodeURIComponent(threadId) + '/live?light=1'
+    );
+    if (state.currentThreadId !== threadId) return;
+    if (result.running && result.turnId) {
+      state.activeTurns[threadId] = result.turnId;
+      syncThreadRunningFlag(threadId, true);
+      renderListQuiet();
+      renderThread();
+      startLivePolling(threadId);
+      return;
+    }
+    const latestId = result.turn && result.turn.id ? result.turn.id : null;
+    if (latestId && latestId !== state.lastTurnIds[threadId]) {
+      openThread(threadId, { silent: true });
+    }
+  } catch (error) {
+    /* 网络抖动不改变现有状态，等下一轮探测 */
+  } finally {
+    state.probing = false;
   }
 }
 
@@ -3164,6 +3299,7 @@ function refreshCurrent() {
 
 function bindEvents() {
   dom.sidebarToggle.addEventListener('click', toggleSidebar);
+  dom.sidebarCollapse.addEventListener('click', () => setSidebarCollapsed(true));
   dom.sidebarClose.addEventListener('click', closeSidebar);
   dom.sidebarRefresh.addEventListener('click', refreshCurrent);
   dom.scrim.addEventListener('click', closeSidebar);
@@ -3336,6 +3472,14 @@ function bindEvents() {
 
   dom.turns.addEventListener('scroll', () => {
     state.pinnedToBottom = isNearBottom();
+    updateJumpButton();
+    /* 滚到顶就自动续载，不用再点按钮 */
+    if (dom.turns.scrollTop < 80) loadEarlierItems();
+  });
+
+  dom.jumpBottom.addEventListener('click', () => {
+    pinToBottomSoon();
+    updateJumpButton();
   });
 
   dom.turns.addEventListener('click', (event) => {
@@ -3423,9 +3567,13 @@ loadUnread();
 loadShelved();
 loadPending();
 loadCollapsedGroups();
+restoreSidebarCollapsed();
 bindEvents();
 updateComposerHint();
-window.addEventListener('resize', updateComposerHint);
+window.addEventListener('resize', () => {
+  updateComposerHint();
+  updateJumpButton();
+});
 connectEvents();
 renderPlaceholder();
 loadBridgeMeta();
@@ -3456,17 +3604,17 @@ setInterval(tickRunTimer, 1000);
 setInterval(() => {
   if (document.hidden || !state.currentThreadId) return;
   if (threadRunning()) return;
-  openThread(state.currentThreadId, { silent: true });
+  probeThreadState(state.currentThreadId);
 }, 6000);
 
 /* The live stream is authoritative while it is delivering events. If a running
    turn stops producing events for a while (flaky Wi-Fi, suspended tab, dropped
-   SSE), fall back to polling so the phone never gets stuck on a stale view. */
+   SSE), fall back to the light live poll instead of re-reading the whole thread. */
 setInterval(() => {
   if (document.hidden || !state.currentThreadId) return;
   if (!threadRunning()) return;
   if (Date.now() - state.lastEventAt < 8000) return;
-  openThread(state.currentThreadId, { silent: true });
+  pollLiveThread(state.currentThreadId);
 }, 3000);
 
 window.addEventListener('focus', refreshIfVisible);

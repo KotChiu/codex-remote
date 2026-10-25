@@ -206,9 +206,11 @@ What you can do:
   results (65KB in one item), 2963 items in a 31-minute session. Parsing that takes hundreds of milliseconds on a
   phone, and the 6-second background poll pays it over and over — which feels like "typing in the composer is laggy
   while Codex is replying". The bridge now does two things:
-  - **Only the latest 500 items** (`GET /api/threads/:id?limit=`, max 20000). The whole session is still on the
-    computer; scrolling to the top of the chat stream shows "⇡ show 500 earlier items", which fetches on demand; the
-    scroll position is anchored by distance-from-bottom, so the view does not jump.
+  - **Windowed reads instead of whole-thread reads**: the first screen loads the last 20 turns / 300 items
+    (`GET /api/threads/:id?limit=&turns=`) through `thread/turns/list` rather than `thread/read includeTurns` —
+    an 84MB session went from 4–9s to about 0.14s. Scrolling to the top auto-loads earlier turns (plus a
+    "⇡ show earlier messages" button), anchored by distance-from-bottom so the view does not jump.
+    When idle the phone only polls the lightweight `?live=1` metadata endpoint and refetches when a new turn appears.
   - **Middle-truncation of very long text** (tool results 6KB, command output 8KB, reasoning 8KB, diffs 20KB, other
     strings 40KB), keeping the head and tail and noting how many characters were omitted.
   Measured on that session: payload 11.5MB → 1.24MB (gzip 341KB), front-end DOM 10.3MB → 1.1MB, items 2963 → 499.

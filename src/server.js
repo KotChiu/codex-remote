@@ -46,7 +46,7 @@ const DEFAULT_PERMISSION_FILE = path.join(os.homedir(), '.codex-remote', 'permis
 /* turn/steer 的 expectedTurnId 对不上（这一轮刚好跑完、或者已经换轮了）时的报错都长这样；
    这些情况下引导没意义，退回正常发送即可。 */
 const STEER_MISS_PATTERN = /expectedturnid|expected turn|no active turn|not active|turn not found|already (?:finished|completed)/i;
-const BRIDGE_VERSION = '1.9.1';
+const BRIDGE_VERSION = '1.9.3';
 /* 延时探测别被 Codex 的忙闲拖住：HTTP 最多等 350ms，超了先用上一次采样；
    采样 1.5 秒内算新鲜，不必重复问 daemon。 */
 const DAEMON_PROBE_DEADLINE_MS = 350;
@@ -199,6 +199,16 @@ function clampItemLimit(raw) {
   const value = Number.parseInt(String(raw === undefined || raw === null ? '' : raw), 10);
   if (!Number.isFinite(value) || value <= 0) return THREAD_ITEM_LIMIT;
   return Math.min(value, THREAD_ITEM_LIMIT_MAX);
+}
+
+/* 一次开多少轮。轮数越多读得越慢（60 轮约 3 秒），首屏默认 20 轮足够铺满一屏。 */
+const THREAD_TURN_LIMIT = 20;
+const THREAD_TURN_LIMIT_MAX = 200;
+
+function clampTurnLimit(raw) {
+  const value = Number.parseInt(String(raw === undefined || raw === null ? '' : raw), 10);
+  if (!Number.isFinite(value) || value <= 0) return THREAD_TURN_LIMIT;
+  return Math.min(value, THREAD_TURN_LIMIT_MAX);
 }
 
 const CLIENT_ACCEPTS_GZIP = Symbol('clientAcceptsGzip');
@@ -1003,6 +1013,40 @@ class Bridge {
     }
   }
 
+  /* 长会话不要整段读：thread/read includeTurns 会把这个 84MB 的 rollout 全解析一遍
+     （实测 4–9 秒），而 thread/turns/list 取最近 10 轮只要 8ms。这里按「最近 N 轮」
+     开窗，元数据单独读（4ms），再用 nextCursor 判断后面还有没有。 */
+  async _readThreadWindow(threadId, turnLimit) {
+    try {
+      const meta = await this.connection.request('thread/read', { threadId });
+      const list = await this.connection.request('thread/turns/list', {
+        threadId,
+        limit: turnLimit,
+        sortDirection: 'desc',
+        itemsView: 'full',
+      });
+      const turns = Array.isArray(list && list.data) ? list.data.slice().reverse() : [];
+      this._reconcileActiveTurn(threadId, turns);
+      return {
+        thread: Object.assign({}, meta && meta.thread, {
+          turns,
+          hasMoreTurns: Boolean(list && list.nextCursor),
+        }),
+        windowed: true,
+      };
+    } catch (error) {
+      const message = error && error.message ? error.message : '';
+      if (!/not supported|do not support|unknown method|method not found|no rollout found/i.test(message)) {
+        throw error;
+      }
+      const result = await this._readThread(threadId);
+      return {
+        thread: Object.assign({}, result && result.thread, { hasMoreTurns: false }),
+        windowed: false,
+      };
+    }
+  }
+
   /* 只取最近一轮。桌面端点开一个会话时，它那一轮由桌面自己的连接持有；
      桥接这边拿不到 item 的实时通知，但可以用这个轻量接口读到进行到哪了。
      比整套 thread/read 小得多（itemsView=notLoaded 时只有 turn 元数据）。 */
@@ -1342,14 +1386,28 @@ class Bridge {
         const threadId = segments[2];
         let turn = null;
         let liveError = null;
+        /* light=1 只回 turn 元数据，不带 items：会话空闲时手机用它探测「有没有新一轮」，
+           不用每 6 秒把几百条记录重新传一遍。 */
+        const light = url.searchParams.get('light') === '1';
         try {
-          turn = slimTurnForPhone(await this._latestTurn(threadId, 'full'));
+          turn = light
+            ? await this._latestTurn(threadId, 'notLoaded')
+            : slimTurnForPhone(await this._latestTurn(threadId, 'full'));
         } catch (error) {
           liveError = error.message;
         }
         /* 只信 daemon 的 status 会把桌面端还在跑的轮次报成已完成；rollout 说在跑时
            以 rollout 为准，并把 status 改写成 inProgress 给前端用。 */
         turn = this._applyRunningTurn(threadId, turn);
+        if (light && turn) {
+          turn = {
+            id: turn.id,
+            status: turn.status,
+            startedAt: turn.startedAt,
+            completedAt: turn.completedAt,
+            error: turn.error || null,
+          };
+        }
         const rolloutTurnId = this._rolloutRunningTurn(threadId);
         const running = Boolean(turn && turn.status === 'inProgress') || Boolean(rolloutTurnId);
         const activeTurnId = (turn && turn.id) || rolloutTurnId;
@@ -1368,8 +1426,9 @@ class Bridge {
       if (segments[1] === 'threads' && segments.length === 3 && request.method === 'GET') {
         const threadId = segments[2];
         const ephemeralEntry = this.ephemeralThreads.get(threadId);
-        const result = await this._readThread(threadId);
         const limit = clampItemLimit(url.searchParams.get('limit'));
+        const turnLimit = clampTurnLimit(url.searchParams.get('turns'));
+        const result = await this._readThreadWindow(threadId, turnLimit);
         const trimmed = limitThreadTurns(result && result.thread && result.thread.turns, limit);
         const trimmedResult = Object.assign({}, result, {
           thread: Object.assign({}, result && result.thread, {
@@ -1397,6 +1456,9 @@ class Bridge {
           attached: this.loadedThreads.has(threadId),
           activeTurnId: this.activeTurns.get(threadId) || null,
           running: Boolean(this.activeTurns.get(threadId)),
+          hasMore:
+            Boolean(trimmedResult.thread && trimmedResult.thread.hasMoreTurns) ||
+            trimmed.omitted > 0,
         });
         if (ephemeralEntry) {
           /* daemon 读不回临时会话的内容，把桥接缓存的事件一并交给前端回放 */
